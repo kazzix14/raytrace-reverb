@@ -4,7 +4,12 @@ use vulkano;
 use vulkano::command_buffer::CommandBuffer;
 use vulkano::sync::GpuFuture;
 
-const IMAGE_SIZE: [u32; 2] = [1024, 1024];
+// m/s
+const SPEED_OF_SOUND: f32 = 340.0;
+
+const SAMPLE_RATE: u32 = 44100;
+
+const IMAGE_SIZE: [u32; 2] = [2048, 2048];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
@@ -195,6 +200,7 @@ fn main() {
             .wait(None)
             .unwrap();
 
+    println!("gpu done!!!");
     /*
     let finished = command_buffer
         .execute(queue.clone())
@@ -232,28 +238,190 @@ fn main() {
     //.expect("failed to create image");
 
     let content = shared_image_buffer.read().expect("failed to read content");
-    let content = content
-        .iter()
-        .map(|v| (v.min(1.0).max(0.0) * std::u8::MAX as f32) as u8)
-        .collect::<Vec<u8>>();
-    let image =
-        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(IMAGE_SIZE[0], IMAGE_SIZE[1], content)
-            .expect("failed to create image");
 
-    image.save("image.png").expect("failed to save image");
+    let intensities_normalized = content
+        .iter()
+        .map(|v| (v.max(0.0).min(1.0) * std::u8::MAX as f32) as u8)
+        .collect::<Vec<u8>>();
+
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        IMAGE_SIZE[0],
+        IMAGE_SIZE[1],
+        intensities_normalized,
+    )
+    .expect("failed to create image");
+
+    image
+        .save("image-normalized.png")
+        .expect("failed to save image");
+
+    let radius: f32 = 0.3;
+
+    // source scale
+    let intensities = content
+        .iter()
+        .map(|v| *v / (4.0 * std::f32::consts::PI * radius.powf(2.0)))
+        .collect::<Vec<f32>>();
 
     let content = shared_dist_image_buffer
         .read()
         .expect("failed to read content");
+    let max = content.iter().fold(0.0 / 0.0, |m, v| v.max(m));
+    let content = content.iter().map(|v| v / max).collect::<Vec<f32>>();
+
+    let content = {
+        let mut content = content;
+        content.iter_mut().skip(3).step_by(4).for_each(|v| *v = 1.0);
+        content
+    };
+
     let content = content
         .iter()
         .map(|v| (v.min(1.0).max(0.0) * std::u8::MAX as f32) as u8)
         .collect::<Vec<u8>>();
+
     let image =
         image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(IMAGE_SIZE[0], IMAGE_SIZE[1], content)
             .expect("failed to create image");
 
     image.save("dist_image.png").expect("failed to save image");
+
+    let content = shared_dist_image_buffer
+        .read()
+        .expect("failed to read content");
+
+    let intensities = {
+        intensities
+            .iter()
+            .cloned()
+            .zip(content.iter().cloned())
+            .map(|(i, d)| i / d.powf(2.0))
+            .collect::<Vec<f32>>()
+    };
+
+    let intensities_conv = intensities
+        .iter()
+        .map(|v| (v.min(1.0).max(0.0) * std::u8::MAX as f32) as u8)
+        .collect::<Vec<u8>>();
+
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        IMAGE_SIZE[0],
+        IMAGE_SIZE[1],
+        intensities_conv,
+    )
+    .expect("failed to create image");
+
+    image.save("image.png").expect("failed to save image");
+
+    // time spent
+    let content = content
+        .iter()
+        .map(|v| v / SPEED_OF_SOUND)
+        .collect::<Vec<f32>>();
+
+    // index
+    let content = content
+        .iter()
+        .map(|v| v * SAMPLE_RATE as f32)
+        .map(|v| v as usize)
+        .collect::<Vec<usize>>();
+
+    let impulse_response_length = content.iter().cloned().max().unwrap() + 1;
+
+    let mut impulse_response = vec![0.0; impulse_response_length];
+    //let mut impulse_response = Vec::<f32>::with_capacity(impulse_response_length);
+
+    content
+        .iter()
+        .cloned()
+        .zip(
+            /*
+            shared_image_buffer
+                .read()
+                .expect("failed to read content")
+                .iter()
+                .cloned(),
+                */
+            intensities.iter().cloned(),
+        )
+        .for_each(|(dist, value)| {
+            impulse_response[dist] += value;
+        });
+
+    plot(&impulse_response, "ir.pdf");
+
+    const FILTER_WIDTH: usize = 100;
+
+    let mut impulse_response_filtered = impulse_response.clone();
+    for index in 0..impulse_response.len() - FILTER_WIDTH {
+        let sum: f32 = impulse_response.iter().skip(index).take(FILTER_WIDTH).sum();
+        let ave = sum / FILTER_WIDTH as f32;
+        impulse_response_filtered[index] = ave;
+    }
+
+    plot(&impulse_response_filtered, "ir-filtered.pdf");
+
+    impulse_response.iter_mut().for_each(|v| *v = v.min(100.0));
+    let max = impulse_response
+        .iter()
+        .fold(0.0 / 0.0, |m, v| v.min(1.0).max(m));
+    impulse_response.iter_mut().for_each(|v| *v /= max);
+
+    use rand::prelude::*;
+    let mut signal = vec![0.0; impulse_response_length];
+    let mut rng = rand::thread_rng();
+    for index in 0..impulse_response_length {
+        signal[index] = rng.gen();
+        signal[index] *= impulse_response[index];
+    }
+
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = hound::WavWriter::create("ir.wav", spec).unwrap();
+
+    for sample in signal {
+        let amp = std::i16::MAX as f32;
+        writer.write_sample((sample * amp) as i16).unwrap();
+        writer.write_sample((sample * amp) as i16).unwrap();
+    }
+
+    writer.finalize().unwrap();
+}
+
+fn plot(content: &Vec<f32>, name: &str) {
+    use gnuplot::AxesCommon;
+    let mut impulse_response_image = gnuplot::Figure::new();
+    impulse_response_image
+        .axes2d()
+        .lines_points(
+            0..content.len(),
+            content,
+            &[
+                gnuplot::Caption(""),
+                gnuplot::Color("black"),
+                //gnuplot::LineWidth(1.0),
+                gnuplot::PointSize(1.0),
+                gnuplot::PointSymbol('.'),
+            ],
+        )
+        /*
+        .lines(
+            0..content.len(),
+            content,
+            &[
+                gnuplot::Caption(""),
+                gnuplot::Color("black"),
+                gnuplot::LineWidth(0.5),
+            ],
+        )
+        */
+        .set_y_log(Some(10.0));
+    impulse_response_image.save_to_pdf(name, 6, 4).unwrap();
 }
 
 mod color {
@@ -382,16 +550,16 @@ mod compute_shader {
 
             const vec3  LDR = vec3(0.577);
             const float EPS = 0.0001;
-            const int   MAX_REF = 128;
+            const int   MAX_REF = 256;
             const float dump_ratio = 0.000000;
-            const float rand_ratio = 1.0;
+            const float rand_ratio = 0.2;
             const int EXEC_COUNT = 128;
 
             // num perticles / m
-            const float particle_density = 5.0;
-            const float particle_try_dist = 10.0;
-            const float particle_probability = 0.0000000001;
-            const float particle_reflection_ratio = 0.97;
+            const float particle_density = 1.0;
+            const float particle_try_dist = 0.0;
+            const float particle_probability = 0.0000;
+            const float particle_reflection_ratio = 1.00;
 
             Sphere sphere[3];
             Plane plane[6];
@@ -439,8 +607,9 @@ mod compute_shader {
             void intersect_particle(Ray ray, inout Intersection intersection) {
                 int hit = 0;
                 for(float dist = 0.0; dist < particle_try_dist; dist += 1.0/particle_density) {
-                    vec2 seed = ray.direction.xy + ray.direction.yz + intersection.hitPoint.xy + intersection.hitPoint.yz - vec2(dist, intersection.normal.z) + gl_GlobalInvocationID.xy;
-                    float seed2 = dist + ray.direction.x + ray.direction.y + intersection.hitPoint.x + intersection.normal.x + gl_GlobalInvocationID.x + gl_GlobalInvocationID.y;
+                    //vec2 seed = ray.direction.xy + ray.origin.yz + intersection.rayDir.xy + intersection.hitPoint.yz - vec2(dist, intersection.normal.z) + gl_GlobalInvocationID.xy;
+                    vec2 seed = vec2(dot((vec2(ray.direction.y) + vec2(dist, intersection.normal.x)), - intersection.normal.yz), intersection.normal.xy);
+                    float seed2 = dist + ray.direction.x + ray.origin.y + ray.direction.y + intersection.hitPoint.x + intersection.intensity + intersection.rayDir.z + intersection.normal.x + gl_GlobalInvocationID.x + gl_GlobalInvocationID.y;
                     if (dist < intersection.distance && rand(seed) < particle_probability) {
                         intersection.hitPoint = ray.origin + ray.direction * dist;
                         intersection.normal = 2.0 * random_in_unit_sphere(seed2) - 1.0;
@@ -599,7 +768,7 @@ mod compute_shader {
                         
                             q.direction = reflect(its.rayDir, its.normal);
                             q.direction = normalize(q.direction);
-                            q.direction += rand_ratio * random_in_unit_sphere(length(its.hitPoint) + its.hitPoint.y + float(count) + its.intensity + float(j));
+                            q.direction += rand_ratio * random_in_unit_sphere(length(its.hitPoint) + its.normal.y + float(count) + its.intensity*its.normal.z - float(j));
                             //q.direction = normalize(q.direction);
 
                             distance += its.distance;
@@ -627,7 +796,8 @@ mod compute_shader {
                 }
             
                 intensity = intensity / float(EXEC_COUNT);
-                distance = distance / float(hit_count);
+                //distance = distance / float(hit_count);
+                distance = distance / float(EXEC_COUNT);
             
                 uint index =
                     gl_GlobalInvocationID.y * constants.image_size.x +
@@ -635,7 +805,7 @@ mod compute_shader {
             
                 //image.pixels[index] = vec4(destColor, 1.0);
                 image.pixels[index] = vec4(vec3(intensity), 1.0);
-                dist_image.pixels[index] = vec4(vec3(distance / 200.0), 1.0);
+                dist_image.pixels[index] = vec4(vec3(distance), 1.0);
             }
 
 
