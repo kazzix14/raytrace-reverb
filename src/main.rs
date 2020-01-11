@@ -141,7 +141,7 @@ fn main() {
                 image_size: IMAGE_SIZE,
                 EPS: 0.000001,
                 reflection_count_limit: 128,
-                rays_per_pixel: 4,
+                rays_per_pixel: 32,
                 num_randoms: NUM_RANDOMS,
             },
             vulkano::buffer::BufferUsage::all(),
@@ -193,6 +193,17 @@ fn main() {
             (),
         )
         .expect("failed to dispatch")
+        .build()
+        .expect("failed to build command buffer")
+        .execute(queue.clone())
+        .expect("failed to execute command buffer")
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+
+    vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+        .expect("failed to create command buffer builder")
         .copy_buffer(local_image_buffer.clone(), shared_image_buffer.clone())
         .expect("failed to copy buffer")
         .copy_buffer(
@@ -604,7 +615,7 @@ mod compute_shader {
             };
 
             const float dump_ratio = 0.000000;
-            const float rand_ratio = 0.1;
+            const float rand_ratio = 0.2;
 
             // num perticles / m
             const float particle_density = 1.0;
@@ -619,6 +630,29 @@ mod compute_shader {
 
             uint invocation_id() {
                 return gl_GlobalInvocationID.y * constants.image_size.x + gl_GlobalInvocationID.x;
+            }
+
+            float rand2(vec2 co) {
+                return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+            }
+            vec3 random_in_unit_sphere2(float seed) {
+                vec3 p;
+                float squared_length;
+                uint count = 0;
+                float x;
+                float y;
+                float z;
+                do {
+                    count += 1;
+                    vec2 seed1 = gl_GlobalInvocationID.xy + (float(count) + seed);
+                    vec2 seed2 = gl_GlobalInvocationID.yz + (float(count) + seed + 1.0);
+                    vec2 seed3 = gl_GlobalInvocationID.xz + (float(count) + seed + 2.0);
+                    x = 2.0 * rand2(seed1) - 1.0;
+                    y = 2.0 * rand2(seed2) - 1.0;
+                    z = 2.0 * rand2(seed3) - 1.0;
+                    squared_length = x * x + y * y + z * z;
+                } while (squared_length >= 1.0);
+                return vec3(x, y, z);
             }
 
             float seed_from_ray_intersection(Ray ray, Intersection intersection) {
@@ -657,9 +691,9 @@ mod compute_shader {
                 float y;
                 float z;
 
-                float seed1 = floor(seed + 1.2) + fract(seed + 3.2);
-                float seed2 = floor(seed + 3.2) + fract(seed + 1.2);
-                float seed3 = floor(seed + 2.2) + fract(seed + 3.3);
+                float seed1 = floor(seed + 1.2) * fract(seed + 3.2);
+                float seed2 = floor(seed + 3.2) * fract(seed + 1.2);
+                float seed3 = floor(seed + 2.2) * fract(seed + 3.3);
 
                 do {
                     count += 0.111222333 * seed;
@@ -878,7 +912,7 @@ mod compute_shader {
                     polygon.v1 = vec3(-4.0, 4.0, -4.0);
                     polygon.v2 = vec3(-4.0, -4.0, 1.0);
                     polygon.reflection_ratio = 1.0;
-                    polygon.diffusion = 0.3;
+                    polygon.diffusion = 0.01;
 
                     // init polygon
                     polygon2.v0 = vec3(4.0, 4.0, 1.0);
@@ -904,12 +938,12 @@ mod compute_shader {
                         
                             q.direction = reflect(its.rayDir, its.normal);
                             q.direction = normalize(q.direction);
-                            float seed = seed_from_ray_intersection(q, its) - float(j);
-                            q.direction += its.diffusion * random_in_unit_sphere(seed);
+                            float seed = seed_from_ray_intersection(q, its) + float(j) * 23.4 - float(count) * 2.23;
+                            q.direction += its.diffusion * random_in_unit_sphere2(seed);
                             q.direction = normalize(q.direction);
 
                             distance += its.distance;
-                            //its.distance = 1.0e30;
+                            //its.distance = 1.0e-30;
                         
                             intersectExec(q, its);
                             its.intensity *= its.intensity_dump_ratio;
