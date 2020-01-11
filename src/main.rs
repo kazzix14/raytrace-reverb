@@ -627,11 +627,13 @@ mod compute_shader {
                 global_seed += (fl + fr + fs + f) * 13579.2468;
             }
 
-            float rand(vec2 co) {
-                return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
+            float rand() {
+                float local_seed = randoms[atomic_randoms_index % constants.num_randoms] + global_seed;
+                update_global_seed(local_seed);
+                return fract(sin(dot(vec2(local_seed, global_seed), vec2(12.9898,78.233))) * 43758.5453);
             }
 
-            vec3 random_in_unit_sphere(float seed) {
+            vec3 random_in_unit_sphere() {
                 vec3 p;
                 float squared_length;
                 uint count = 0;
@@ -640,14 +642,10 @@ mod compute_shader {
                 float y;
                 float z;
 
-                vec2 seed1 = vec2(seed, -seed);
-                vec2 seed2 = vec2(-seed, seed);
-                vec2 seed3 = vec2(-seed, -seed);
-
                 do {
-                    x = 2.0 * rand(seed1) - 1.0;
-                    y = 2.0 * rand(seed2) - 1.0;
-                    z = 2.0 * rand(seed3) - 1.0;
+                    x = 2.0 * rand() - 1.0;
+                    y = 2.0 * rand() - 1.0;
+                    z = 2.0 * rand() - 1.0;
 
                     squared_length = x * x + y * y + z * z;
                 } while (squared_length >= 1.0);
@@ -679,9 +677,9 @@ mod compute_shader {
             void intersect_particle(Ray ray, inout Intersection intersection) {
                 int hit = 0;
                 for(float dist = 0.0; dist < particle_try_dist; dist += 1.0/particle_density) {
-                    if (dist < intersection.distance && rand(vec2(dist, dist * 0.3)) < particle_probability) {
+                    if (dist < intersection.distance && rand() < particle_probability) {
                         intersection.hitPoint = ray.origin + ray.direction * dist;
-                        intersection.normal = 2.0 * random_in_unit_sphere(dist) - 1.0;
+                        intersection.normal = 2.0 * random_in_unit_sphere() - 1.0;
 
                         intersection.distance = dist;
                         intersection.hit++;
@@ -888,7 +886,7 @@ mod compute_shader {
                             q.direction = reflect(its.rayDir, its.normal);
                             q.direction = normalize(q.direction);
                             //q.direction += its.diffusion * random_in_unit_sphere();
-                            q.direction += its.diffusion * random_in_unit_sphere(j);
+                            q.direction += its.diffusion * random_in_unit_sphere();
                             q.direction = normalize(q.direction);
 
                             distance += its.distance;
