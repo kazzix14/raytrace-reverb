@@ -140,8 +140,8 @@ fn main() {
             compute_shader::ty::Constants {
                 image_size: IMAGE_SIZE,
                 EPS: 0.000001,
-                reflection_count_limit: 64,
-                rays_per_pixel: 32,
+                reflection_count_limit: 128,
+                rays_per_pixel: 4,
                 num_randoms: NUM_RANDOMS,
             },
             vulkano::buffer::BufferUsage::all(),
@@ -623,9 +623,8 @@ mod compute_shader {
 
             float seed_from_ray_intersection(Ray ray, Intersection intersection) {
                 float from_ray = 
-                    ray.direction.z * 12.345 * 6.789 +
-                    ray.direction.y * 12.345 +
-                    ray.direction.x;
+                    ray.direction.z * 1.2345 * 6.789 +
+                    ray.direction.y * 1.2345 * ray.direction.x;
 
                 float from_intersection =
                     float(intersection.hit) * 1.2345 +
@@ -634,17 +633,18 @@ mod compute_shader {
                     intersection.intensity +
                     intersection.diffusion;
 
-                return fract(sin(from_ray + from_intersection * 1.23));
+                float from_invocation_id = invocation_id();
+
+                return fract(sin(from_ray + from_intersection * 1.23) * invocation_id());
             }
 
             float random_hash(int seed) {
-                //return randoms[invocation_id() + seed % constants.num_randoms];
-                return 0.1;
+                return randoms[uint(float(invocation_id() + seed * 12389)) % constants.num_randoms];
             }
 
             float rand(float seed) {
-                float r1 = fract(sin(dot(vec2(seed, fract(sin(0.345 * seed - 123.45))), vec2(12.9898,78.233))) * 43758.5453);
-                float r2 = fract(sin(dot(vec2(r1, fract(sin(0.345 * r1- 123.45))), vec2(12.9898,78.233))) * 43758.5453);
+                float r1 = fract(sin(dot(vec2(seed, random_hash(int(seed))), vec2(12.9898,78.233))) * 43758.5453);
+                float r2 = fract(sin(dot(vec2(r1, random_hash(int(r1))), vec2(12.9898,78.233))) * 43758.5453);
                 return fract(sin(seed + r1 - r2));
             }
 
@@ -657,12 +657,16 @@ mod compute_shader {
                 float y;
                 float z;
 
-                do {
-                    count += 1.111222333;
+                float seed1 = floor(seed + 1.2) + fract(seed + 3.2);
+                float seed2 = floor(seed + 3.2) + fract(seed + 1.2);
+                float seed3 = floor(seed + 2.2) + fract(seed + 3.3);
 
-                    x = 2.0 * rand(count + seed * 12.34) - 1.0;
-                    y = 2.0 * rand(count + seed * 45.67) - 1.0;
-                    z = 2.0 * rand(count + seed * 89.01) - 1.0;
+                do {
+                    count += 0.111222333 * seed;
+
+                    x = 2.0 * rand(count + seed1 * 12.34) - 1.0;
+                    y = 2.0 * rand(count + seed2 * 45.67) - 1.0;
+                    z = 2.0 * rand(count + seed3 * 89.01) - 1.0;
 
                     squared_length = x * x + y * y + z * z;
                 } while (squared_length >= 1.0);
@@ -743,7 +747,7 @@ mod compute_shader {
                 float t = -(dot(ray.origin, plane.normal) + d) / v;
                 if(constants.EPS < t && t < intersection.distance){
                     intersection.hitPoint = ray.origin + ray.direction * t;
-                    intersection.normal = plane.normal;
+                    intersection.normal = normalize(plane.normal);
                     intersection.distance = t;
                     intersection.hit++;
                     intersection.rayDir = ray.direction;
@@ -892,7 +896,7 @@ mod compute_shader {
                     vec3 tempColor = vec3(0.0);
                     Ray q;
                     intersectExec(ray, its);
-                    if(its.hit > 0){
+                    if(0 < its.hit){
                         destColor = its.color;
                         tempColor *= its.color;
                         for(int j = 1; j < constants.reflection_count_limit; j++){
