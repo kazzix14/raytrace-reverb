@@ -620,15 +620,22 @@ mod compute_shader {
             Polygon polygon2;
 
             void update_global_seed(float f) {
+                /*
                 float fl = floor(f * 98765.4321);
                 float fr = fract(f * 1234.56789);
                 float fs = sin(fl + fr);
                 global_seed += (fl + fr + fs + f) * 0.135792468;
+                */
+                global_seed += sin(f);
                 //global_seed = sin(global_seed);
             }
 
+            uint invocation_id() {
+                return gl_GlobalInvocationID.y * constants.image_size.x + gl_GlobalInvocationID.x;
+            }
+
             float rand() {
-                float local_seed = randoms[atomic_randoms_index % constants.num_randoms] + global_seed;
+                float local_seed = randoms[invocation_id() % constants.num_randoms] + global_seed;
                 update_global_seed(local_seed);
                 return fract(sin(dot(vec2(local_seed, global_seed), vec2(12.9898,78.233))) * 43758.5453);
             }
