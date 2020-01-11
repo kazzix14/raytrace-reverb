@@ -46,6 +46,7 @@ uint invocation_id() {
 void compute() {
     uint idx = invocation_id();
     if (constants.image_length * 6 <= idx) return;
+    //vec3 dist_decay = distancies[idx].xyz * distancies[idx].xyz;
     vec3 dist_decay = distancies[idx].xyz * distancies[idx].xyz;
     //vec3 radius_decay = vec3(4.0 * PI * constants.radius * constants.radius);
     //vec3 image_size_decay = vec3(float(constants.image_length * 6));

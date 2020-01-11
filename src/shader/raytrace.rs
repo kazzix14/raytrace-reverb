@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) buffer Constants {
     uint rays_per_pixel;
     uint num_randoms;
     float ray_length;
+    float source_radius;
 } constants;
 
 layout(set = 0, binding = 1) buffer Randoms {
@@ -63,7 +64,6 @@ const float particle_reflection_ratio = 1.00;
 struct Sphere {
     float radius;
     vec3  position;
-    vec3 color;
     float reflection_ratio;
     // boolean
     int emission;
@@ -72,7 +72,6 @@ struct Sphere {
 struct Plane {
     vec3 position;
     vec3 normal;
-    vec3 color;
     float reflection_ratio;
 };
 
@@ -89,7 +88,6 @@ struct Intersection {
     int hit_emission;
     vec3  hitPoint;
     vec3  normal;
-    vec3  color;
     float distance;
     vec3  rayDir;
     float intensity;
@@ -215,7 +213,6 @@ void initialize_intersection(inout Intersection intersection) {
     intersection.hit      = 0;
     intersection.hitPoint = vec3(0.0);
     intersection.normal   = vec3(0.0);
-    intersection.color    = vec3(0.0);
     intersection.intensity = 1.0;
     intersection.distance = constants.ray_length;
     intersection.rayDir   = vec3(0.0);
@@ -253,7 +250,6 @@ void intersect_sphere(Ray ray, Sphere sphere, inout Intersection intersection){
     if(0.0 < d && constants.EPS < t && t < intersection.distance){
         intersection.hitPoint = ray.origin + ray.direction * t;
         intersection.normal = normalize(intersection.hitPoint - sphere.position);
-        //intersection.color = sphere.color * d;
         intersection.distance = t;
         intersection.hit++;
         intersection.rayDir = ray.direction;
@@ -377,51 +373,42 @@ void compute() {
         // sphere init
         sphere[0].radius = 0.5;
         sphere[0].position = vec3(0.0, -0.5, sin(1.0));
-        sphere[0].color = vec3(1.0, 0.0, 0.0);
         sphere[0].reflection_ratio = 1.0;
         sphere[0].emission = 0;
     
         sphere[1].radius = 1.0;
-        sphere[1].position = vec3(2.0, 0.0, cos(1.0 * 0.666));
-        sphere[1].color = vec3(0.0, 1.0, 0.0);
+        sphere[1].position = vec3(2.0, 0.0, 0.0);
         sphere[1].reflection_ratio = 1.0;
         sphere[1].emission = 0;
     
-        sphere[2].radius = 0.3;
-        sphere[2].position = vec3(-2.0, 0.5, -3.0);
-        sphere[2].color = vec3(0.0, 0.0, 1.0);
+        sphere[2].radius = constants.source_radius;
+        sphere[2].position = vec3(-2.0, 0.5, -5.0);
         sphere[2].reflection_ratio = 1.0;
         sphere[2].emission = 1;
     
         // plane init
         plane[0].position = vec3(0.0, -5.0, 0.0);
         plane[0].normal = vec3(0.0, 1.0, 0.0);
-        plane[0].color = vec3(0.0, 1.0, 0.0);
         plane[0].reflection_ratio = 1.0;
     
         plane[1].position = vec3(0.0, 5.0, 0.0);
         plane[1].normal = vec3(0.0, -1.0, 0.0);
-        plane[1].color = vec3(1.0, 0.0, 1.0);
         plane[1].reflection_ratio = 1.0;
     
         plane[2].position = vec3(-5.0, 0.0, 0.0);
         plane[2].normal = vec3(1.0, 0.0, 0.0);
-        plane[2].color = vec3(1.0, 0.0, 0.0);
         plane[2].reflection_ratio = 1.0;
     
         plane[3].position = vec3(5.0, 0.0, 0.0);
         plane[3].normal = vec3(-1.0, 0.0, 0.0);
-        plane[3].color = vec3(0.0, 1.0, 1.0);
         plane[3].reflection_ratio = 1.0;
     
-        plane[4].position = vec3(0.0, 0.0, -5.0);
+        plane[4].position = vec3(0.0, 0.0, -10.0);
         plane[4].normal = vec3(0.0, 0.0, 1.0);
-        plane[4].color = vec3(0.0, 0.0, 1.0);
         plane[4].reflection_ratio = 1.0;
     
         plane[5].position = vec3(0.0, 0.0, 5.0);
         plane[5].normal = vec3(0.0, 0.0, -1.0);
-        plane[5].color = vec3(1.0, 1.0, 0.0);
         plane[5].reflection_ratio = 1.0;
 
         // init polygon
@@ -443,13 +430,9 @@ void compute() {
         initialize_intersection(its);
     
         // hit check
-        vec3 destColor = vec3(ray.direction.y);
-        vec3 tempColor = vec3(0.0);
         Ray q;
         intersectExec(ray, its);
         if(0 < its.hit){
-            destColor = its.color;
-            tempColor *= its.color;
             for(int j = 1; j < constants.reflection_count_limit; j++){
                 q.origin = its.hitPoint + its.normal * constants.EPS;
             
@@ -471,8 +454,6 @@ void compute() {
                 intersectExec(q, its);
                 its.intensity *= its.intensity_dump_ratio;
                 if(its.hit > j){
-                    destColor += tempColor * its.color;
-                    tempColor *= its.color;
                 }
 
                 if (0 < its.hit_emission) {

@@ -12,7 +12,7 @@ const SPEED_OF_SOUND: f32 = 340.0;
 
 const SAMPLE_RATE: u32 = 44100;
 
-const IMAGE_SIZE: [u32; 2] = [1024, 1024];
+const IMAGE_SIZE: [u32; 2] = [512, 512];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
@@ -32,6 +32,7 @@ const NUM_DISPATCH_POSTPROCESS: [u32; 3] = [
 const NUM_RANDOMS: u32 = 317;
 
 fn main() {
+    let audio_source_radius: f32 = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
     let radius: f32 = 0.3;
     let mut rng = rand::thread_rng();
 
@@ -133,10 +134,11 @@ fn main() {
             shader::raytrace::ty::Constants {
                 image_size: IMAGE_SIZE,
                 EPS: 0.000001,
-                reflection_count_limit: 128,
-                rays_per_pixel: 32,
+                reflection_count_limit: 512,
+                rays_per_pixel: 16,
                 num_randoms: NUM_RANDOMS,
-                ray_length: 1e10,
+                ray_length: 1e3,
+                source_radius: audio_source_radius,
             },
             vulkano::buffer::BufferUsage::all(),
             queue.clone(),
@@ -374,10 +376,10 @@ fn main() {
     }
 
     //scale_intensities(&mut intensities, radius, IMAGE_LENGTH, &distancies);
-    let mut intensities_left = get_half_of_cube(&intensities, false);
-    let mut intensities_right = get_half_of_cube(&intensities, true);
-    let mut distancies_left = get_half_of_cube(&distancies, false);
-    let mut distancies_right = get_half_of_cube(&distancies, true);
+    let intensities_left = get_half_of_cube(&intensities, false);
+    let intensities_right = get_half_of_cube(&intensities, true);
+    let distancies_left = get_half_of_cube(&distancies, false);
+    let distancies_right = get_half_of_cube(&distancies, true);
     let mut impulse_response_left = build_intensity_vec(
         &distancies_left,
         &intensities_left,
@@ -406,8 +408,10 @@ fn main() {
         plot(&impulse_response_filtered, "ir-filtered-right.pdf");
     }
 
-    //ceil_at(&mut impulse_response_left, 1.0);
-    //ceil_at(&mut impulse_response_right, 1.0);
+    /*
+    ceil_at(&mut impulse_response_left, 1.0);
+    ceil_at(&mut impulse_response_right, 1.0);
+    */
     let max_left = max_of(&impulse_response_left);
     let max_right = max_of(&impulse_response_right);
     let max = max_left.max(max_right);
