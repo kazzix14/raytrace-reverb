@@ -12,7 +12,7 @@ const SPEED_OF_SOUND: f32 = 340.0;
 
 const SAMPLE_RATE: u32 = 44100;
 
-const IMAGE_SIZE: [u32; 2] = [256, 256];
+const IMAGE_SIZE: [u32; 2] = [1024, 1024];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
@@ -136,6 +136,7 @@ fn main() {
                 reflection_count_limit: 128,
                 rays_per_pixel: 32,
                 num_randoms: NUM_RANDOMS,
+                ray_length: 1e10,
             },
             vulkano::buffer::BufferUsage::all(),
             queue.clone(),
@@ -355,6 +356,7 @@ fn main() {
             .cloned()
             .enumerate()
             .filter_map(|(i, v)| {
+                // 24 = num_images(fblrtb = 6) * num_channels(rgba = 4)
                 if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
                     Some(v)
                 } else {
@@ -372,26 +374,104 @@ fn main() {
     }
 
     //scale_intensities(&mut intensities, radius, IMAGE_LENGTH, &distancies);
+    let mut intensities_left = get_half_of_cube(&intensities, false);
+    let mut intensities_right = get_half_of_cube(&intensities, true);
+    let mut distancies_left = get_half_of_cube(&distancies, false);
+    let mut distancies_right = get_half_of_cube(&distancies, true);
+    let mut impulse_response_left = build_intensity_vec(
+        &distancies_left,
+        &intensities_left,
+        SPEED_OF_SOUND,
+        SAMPLE_RATE,
+    );
 
-    let mut impulse_response =
-        build_intensity_vec(&distancies, &intensities, SPEED_OF_SOUND, SAMPLE_RATE);
+    let mut impulse_response_right = build_intensity_vec(
+        &distancies_right,
+        &intensities_right,
+        SPEED_OF_SOUND,
+        SAMPLE_RATE,
+    );
 
-    plot(&impulse_response, "ir.pdf");
+    //plot(&impulse_response, "ir.pdf");
 
     const FILTER_WIDTH: usize = 100;
 
-    let mut impulse_response_filtered = impulse_response.clone();
-    filter(&mut impulse_response_filtered, FILTER_WIDTH);
-    plot(&impulse_response_filtered, "ir-filtered.pdf");
+    {
+        let mut impulse_response_filtered = impulse_response_left.clone();
+        filter(&mut impulse_response_filtered, FILTER_WIDTH);
+        plot(&impulse_response_filtered, "ir-filtered-left.pdf");
 
-    //ceil_at(&mut impulse_response, 100.0);
-    normalize(&mut impulse_response);
-    plot(&impulse_response, "ir-normalized.pdf");
+        let mut impulse_response_filtered = impulse_response_right.clone();
+        filter(&mut impulse_response_filtered, FILTER_WIDTH);
+        plot(&impulse_response_filtered, "ir-filtered-right.pdf");
+    }
 
-    let mut signal = white_noise(impulse_response.len());
+    //ceil_at(&mut impulse_response_left, 1.0);
+    //ceil_at(&mut impulse_response_right, 1.0);
+    let max_left = max_of(&impulse_response_left);
+    let max_right = max_of(&impulse_response_right);
+    let max = max_left.max(max_right);
+
+    impulse_response_left.iter_mut().for_each(|v| *v /= max);
+    impulse_response_right.iter_mut().for_each(|v| *v /= max);
+
+    plot(&impulse_response_left, "ir-normalized-left.pdf");
+    plot(&impulse_response_right, "ir-normalized-right.pdf");
+
+    let len_left = impulse_response_left.len();
+    let len_right = impulse_response_right.len();
+    let len = len_left.max(len_right);
+
+    let impulse_response = {
+        (0..len)
+            .map(|index| {
+                let sample_left = impulse_response_left.get(index).unwrap_or(&0.0);
+                let sample_right = impulse_response_right.get(index).unwrap_or(&0.0);
+                [*sample_left, *sample_right]
+            })
+            .collect::<Vec<[f32; 2]>>()
+    };
+
+    let mut signal = white_noise(len);
+
     amplitude(&mut signal, &impulse_response);
 
     write_wav(signal, "ir.wav".to_string());
+}
+
+fn get_half_of_cube(source: &Vec<f32>, is_right: bool) -> Vec<f32> {
+    // f b l r t b
+    const NUM_CHANNELS: usize = 4;
+    const IMAGE_HALF_WIDTH: usize = IMAGE_SIZE[0] as usize;
+
+    source
+        .iter()
+        .skip(IMAGE_LENGTH * 2 * NUM_CHANNELS)
+        .take(IMAGE_LENGTH * NUM_CHANNELS) // l
+        .chain(
+            source
+                .iter()
+                .take(IMAGE_LENGTH * 2 * NUM_CHANNELS) // f b
+                .chain(
+                    source
+                        .iter()
+                        .skip(IMAGE_LENGTH * 4 * NUM_CHANNELS)
+                        .take(IMAGE_LENGTH * 2 * NUM_CHANNELS), // t b
+                )
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    // gather left/right half
+                    match ((i / (IMAGE_HALF_WIDTH * NUM_CHANNELS)) % 2, is_right) {
+                        (0, false) => Some(v),
+                        (1, false) => None,
+                        (0, true) => None,
+                        (1, true) => Some(v),
+                        _ => unreachable!(),
+                    }
+                }),
+        )
+        .cloned()
+        .collect()
 }
 
 fn scale_intensities(
@@ -521,11 +601,11 @@ fn ceil_at(target: &mut Vec<f32>, ceil: f32) {
     target.iter_mut().for_each(|v| *v = v.min(ceil));
 }
 
-fn amplitude(lhs: &mut Vec<[f32; 2]>, rhs: &Vec<f32>) {
+fn amplitude(lhs: &mut Vec<[f32; 2]>, rhs: &Vec<[f32; 2]>) {
     assert_eq!(lhs.len(), rhs.len());
     for index in 0..lhs.len() {
-        lhs[index][0] *= rhs[index];
-        lhs[index][1] *= rhs[index];
+        lhs[index][0] *= rhs[index][0];
+        lhs[index][1] *= rhs[index][1];
     }
 }
 

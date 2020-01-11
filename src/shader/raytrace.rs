@@ -30,6 +30,7 @@ layout(set = 0, binding = 0) buffer Constants {
     uint reflection_count_limit;
     uint rays_per_pixel;
     uint num_randoms;
+    float ray_length;
 } constants;
 
 layout(set = 0, binding = 1) buffer Randoms {
@@ -94,6 +95,7 @@ struct Intersection {
     float intensity;
     float intensity_dump_ratio;
     float diffusion;
+    float distance_to_live;
 };
 
 const float dump_ratio = 0.000000;
@@ -215,11 +217,12 @@ void initialize_intersection(inout Intersection intersection) {
     intersection.normal   = vec3(0.0);
     intersection.color    = vec3(0.0);
     intersection.intensity = 1.0;
-    intersection.distance = 1.0e+30;
+    intersection.distance = constants.ray_length;
     intersection.rayDir   = vec3(0.0);
     intersection.hit_emission = 0;
     intersection.intensity_dump_ratio = 1.0;
     intersection.diffusion = 1.0;
+    intersection.distance_to_live = constants.ray_length;
 }
 
 void intersect_particle(Ray ray, inout Intersection intersection) {
@@ -457,7 +460,13 @@ void compute() {
                 q.direction = normalize(q.direction);
 
                 distance += its.distance;
-                its.distance = 1.0e+3;
+                its.distance_to_live -= its.distance;
+
+                its.distance = constants.ray_length;
+
+                if (its.distance_to_live < 0.0) {
+                    break;
+                }
             
                 intersectExec(q, its);
                 its.intensity *= its.intensity_dump_ratio;
