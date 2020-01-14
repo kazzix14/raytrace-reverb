@@ -1,3 +1,4 @@
+mod obj;
 mod shader;
 
 use crate::color::Color;
@@ -11,8 +12,9 @@ use vulkano::sync::GpuFuture;
 const SPEED_OF_SOUND: f32 = 340.0;
 
 const SAMPLE_RATE: u32 = 44100;
+const RAYS_PER_PIXEL: u32 = 1;
 
-const IMAGE_SIZE: [u32; 2] = [512, 512];
+const IMAGE_SIZE: [u32; 2] = [1024, 1024];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
@@ -32,8 +34,10 @@ const NUM_DISPATCH_POSTPROCESS: [u32; 3] = [
 const NUM_RANDOMS: u32 = 317;
 
 fn main() {
-    let audio_source_radius: f32 = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
-    let radius: f32 = 0.3;
+    let obj_vertices = obj::vertices();
+
+    let audio_source_radius = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
+    let ray_length = 340.0;
     let mut rng = rand::thread_rng();
 
     let instance = vulkano::instance::Instance::new(
@@ -82,8 +86,8 @@ fn main() {
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
-        .unwrap()
-    };
+    }
+    .unwrap();
 
     let local_dist_image_buffer = unsafe {
         vulkano::buffer::DeviceLocalBuffer::raw(
@@ -92,8 +96,8 @@ fn main() {
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
-        .unwrap()
-    };
+    }
+    .unwrap();
 
     let shared_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
@@ -109,6 +113,7 @@ fn main() {
     )
     .unwrap();
 
+    /*
     let (local_randoms_buffer, local_randoms_buffer_submit_command) =
         vulkano::buffer::ImmutableBuffer::from_data(
             shader::raytrace::SizedRandoms {
@@ -128,16 +133,26 @@ fn main() {
         .unwrap()
         .wait(None)
         .unwrap();
+        */
+
+    let local_randoms_buffer = unsafe {
+        vulkano::buffer::DeviceLocalBuffer::raw(
+            device.clone(),
+            4 * NUM_RANDOMS as usize,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
 
     let (local_constants_buffer, local_constants_buffer_submit_command) =
         vulkano::buffer::ImmutableBuffer::from_data(
             shader::raytrace::ty::Constants {
                 image_size: IMAGE_SIZE,
                 EPS: 0.000001,
-                reflection_count_limit: 512,
-                rays_per_pixel: 16,
+                reflection_count_limit: 4096,
                 num_randoms: NUM_RANDOMS,
-                ray_length: 1e3,
+                ray_length: ray_length, // 3 s
                 source_radius: audio_source_radius,
             },
             vulkano::buffer::BufferUsage::all(),
@@ -150,6 +165,37 @@ fn main() {
         .unwrap()
         .wait(None)
         .unwrap();
+
+    let model_buffer_length = 4 + obj_vertices.len() * 4;
+    let (local_model_buffer, local_model_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            model_buffer_length,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[f32]>::raw(
+            device.clone(),
+            model_buffer_length,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_buffer.write().unwrap();
+        write_lock.iter_mut().enumerate().for_each(|(i, v)| {
+            *v = match i {
+                0 => unsafe { *(&(obj_vertices.len() as u32) as *const u32 as *const f32) },
+                i => obj_vertices[i - 1],
+            }
+        });
+    }
 
     let compute_pipeline = Arc::new(
         vulkano::pipeline::ComputePipeline::new(
@@ -173,20 +219,54 @@ fn main() {
         .add_buffer(local_image_buffer.clone())
         .expect("failed to add local image buffer")
         .add_buffer(local_dist_image_buffer.clone())
-        .expect("failed to add local image buffer")
+        .expect("failed to add dist local image buffer")
+        .add_buffer(local_model_buffer.clone())
+        .expect("failed to add local model buffer")
         .build()
         .expect("failed to create descriptor set"),
     );
 
+    let mut image_distancies_ave = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    image_distancies_ave
+        .iter_mut()
+        .for_each(|i| i.resize(IMAGE_LENGTH * 4, 0.0));
+
+    let mut image_intensities_ave = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    image_intensities_ave
+        .iter_mut()
+        .for_each(|i| i.resize(IMAGE_LENGTH * 4, 0.0));
+
+    let mut impulse_response_left = Vec::new();
+    let mut impulse_response_right = Vec::new();
+
+    impulse_response_left.resize(
+        (ray_length / SPEED_OF_SOUND as f32 * SAMPLE_RATE as f32) as usize,
+        0.0,
+    );
+
+    impulse_response_right.resize(
+        (ray_length / SPEED_OF_SOUND as f32 * SAMPLE_RATE as f32) as usize,
+        0.0,
+    );
+
     vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
         .expect("failed to create command buffer builder")
-        .dispatch(
-            NUM_DISPATCH,
-            compute_pipeline.clone(),
-            descriptor_set.clone(),
-            (),
-        )
-        .expect("failed to dispatch")
+        .copy_buffer(shared_model_buffer.clone(), local_model_buffer_init.clone())
+        .expect("failed to copy buffer")
         .build()
         .expect("failed to build command buffer")
         .execute(queue.clone())
@@ -196,205 +276,329 @@ fn main() {
         .wait(None)
         .unwrap();
 
-    vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
-        .expect("failed to create command buffer builder")
-        .copy_buffer(local_image_buffer.clone(), shared_image_buffer.clone())
-        .expect("failed to copy buffer")
-        .copy_buffer(
-            local_dist_image_buffer.clone(),
-            shared_dist_image_buffer.clone(),
-        )
-        .expect("failed to copy buffer")
-        .build()
-        .expect("failed to build command buffer")
-        .execute(queue.clone())
-        .expect("failed to execute command buffer")
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
-
-    println!("raytrace done!!!");
-
-    let intensities = shared_image_buffer
-        .read()
-        .expect("failed to read content")
-        .iter()
-        .copied()
-        .collect::<Vec<f32>>();
-
-    let distancies = shared_dist_image_buffer
-        .read()
-        .expect("failed to read content")
-        .iter()
-        .copied()
-        .collect::<Vec<f32>>();
-
-    for offset in 0..6 {
-        let mut intensities = intensities.clone();
-        normalize(&mut intensities);
-        set_alpha_to_1(&mut intensities);
-        let intensities = intensities
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<f32>>();
-
-        let mut distancies = distancies.clone();
-        normalize(&mut distancies);
-        set_alpha_to_1(&mut distancies);
-        let distancies = distancies
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<f32>>();
-
-        save_as_image_with_out_normalize(
-            &intensities,
-            IMAGE_SIZE[0],
-            IMAGE_SIZE[1],
-            format!("intensities-{}.png", offset.to_string()),
-        );
-
-        save_as_image_with_out_normalize(
-            &distancies,
-            IMAGE_SIZE[0],
-            IMAGE_SIZE[1],
-            format!("distancies-{}.png", offset.to_string()),
-        );
-    }
-
-    let (local_constants_buffer, local_constants_buffer_submit_command) =
-        vulkano::buffer::ImmutableBuffer::from_data(
-            shader::postprocess::ty::Constants {
-                radius: radius,
-                image_length: IMAGE_LENGTH as u32,
-            },
-            vulkano::buffer::BufferUsage::all(),
-            queue.clone(),
-        )
-        .unwrap();
-
-    local_constants_buffer_submit_command
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
-
-    let postprocess_shader =
-        shader::postprocess::Shader::load(device.clone()).expect("failed to load compute shader");
-
-    let compute_pipeline = Arc::new(
-        vulkano::pipeline::ComputePipeline::new(
+    for ray_count in 0..RAYS_PER_PIXEL {
+        let shared_randoms_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
             device.clone(),
-            &postprocess_shader.main_entry_point(),
-            &(),
+            vulkano::buffer::BufferUsage::all(),
+            (0..NUM_RANDOMS).map(|_| rng.gen::<f32>()),
         )
-        .expect("failed to create compute pipeline"),
-    );
-
-    let descriptor_set = Arc::new(
-        vulkano::descriptor::descriptor_set::PersistentDescriptorSet::start(
-            compute_pipeline.clone(),
-            0,
-        )
-        .add_buffer(local_constants_buffer.clone())
-        .expect("failed to add local constants buffer")
-        .add_buffer(shared_image_buffer.clone())
-        .expect("failed to add local image buffer")
-        .add_buffer(shared_dist_image_buffer.clone())
-        .expect("failed to add local image buffer")
-        .build()
-        .expect("failed to create descriptor set"),
-    );
-
-    vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
-        .expect("failed to create command buffer builder")
-        .dispatch(
-            NUM_DISPATCH_POSTPROCESS,
-            compute_pipeline.clone(),
-            descriptor_set.clone(),
-            (),
-        )
-        .expect("failed to dispatch")
-        .build()
-        .expect("failed to build command buffer")
-        .execute(queue.clone())
-        .expect("failed to execute command buffer")
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
         .unwrap();
 
-    println!("postprocess done!!!");
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .copy_buffer(shared_randoms_buffer.clone(), local_randoms_buffer.clone())
+            .expect("failed to copy buffer")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
 
-    let mut intensities = shared_image_buffer
-        .read()
-        .expect("failed to read content")
-        .iter()
-        .copied()
-        .collect::<Vec<f32>>();
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .dispatch(
+                NUM_DISPATCH,
+                compute_pipeline.clone(),
+                descriptor_set.clone(),
+                (),
+            )
+            .expect("failed to dispatch")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
 
-    for offset in 0..6 {
-        let mut intensities = intensities.clone();
-        normalize(&mut intensities);
-        set_alpha_to_1(&mut intensities);
-        let intensities = intensities
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .copy_buffer(local_image_buffer.clone(), shared_image_buffer.clone())
+            .expect("failed to copy buffer")
+            .copy_buffer(
+                local_dist_image_buffer.clone(),
+                shared_dist_image_buffer.clone(),
+            )
+            .expect("failed to copy buffer")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        println!("raytrace {}/{} done!!!", ray_count + 1, RAYS_PER_PIXEL);
+
+        let intensities = shared_image_buffer
+            .read()
+            .expect("failed to read content")
             .iter()
-            .cloned()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                // 24 = num_images(fblrtb = 6) * num_channels(rgba = 4)
-                if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
+            .copied()
             .collect::<Vec<f32>>();
 
+        let distancies = shared_dist_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
+
+        for offset in 0..6 {
+            let mut intensities = intensities.clone();
+            normalize(&mut intensities);
+            set_alpha_to_1(&mut intensities);
+            let intensities = intensities
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
+
+            let mut distancies = distancies.clone();
+            normalize(&mut distancies);
+            set_alpha_to_1(&mut distancies);
+            let distancies = distancies
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
+
+            let dir = match offset {
+                0 => "front",
+                1 => "back",
+                2 => "left",
+                3 => "right",
+                4 => "top",
+                5 => "bottom",
+                _ => unreachable!(),
+            };
+
+            intensities
+                .iter()
+                .enumerate()
+                .for_each(|(i, &v)| image_intensities_ave[offset][i] += v);
+
+            distancies
+                .iter()
+                .enumerate()
+                .for_each(|(i, &v)| image_distancies_ave[offset][i] += v);
+
+            /*
+            save_as_image_with_out_normalize(
+                &intensities,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("intensities-{}-{}.png", dir, ray_count),
+            );
+
+            save_as_image_with_out_normalize(
+                &distancies,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("distancies-{}-{}.png", dir, ray_count),
+            );
+            */
+        }
+
+        let (local_constants_buffer, local_constants_buffer_submit_command) =
+            vulkano::buffer::ImmutableBuffer::from_data(
+                shader::postprocess::ty::Constants {
+                    radius: audio_source_radius,
+                    image_length: IMAGE_LENGTH as u32,
+                },
+                vulkano::buffer::BufferUsage::all(),
+                queue.clone(),
+            )
+            .unwrap();
+
+        local_constants_buffer_submit_command
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        let postprocess_shader = shader::postprocess::Shader::load(device.clone())
+            .expect("failed to load compute shader");
+
+        let compute_pipeline = Arc::new(
+            vulkano::pipeline::ComputePipeline::new(
+                device.clone(),
+                &postprocess_shader.main_entry_point(),
+                &(),
+            )
+            .expect("failed to create compute pipeline"),
+        );
+
+        let descriptor_set = Arc::new(
+            vulkano::descriptor::descriptor_set::PersistentDescriptorSet::start(
+                compute_pipeline.clone(),
+                0,
+            )
+            .add_buffer(local_constants_buffer.clone())
+            .expect("failed to add local constants buffer")
+            .add_buffer(shared_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .add_buffer(shared_dist_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .build()
+            .expect("failed to create descriptor set"),
+        );
+
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .dispatch(
+                NUM_DISPATCH_POSTPROCESS,
+                compute_pipeline.clone(),
+                descriptor_set.clone(),
+                (),
+            )
+            .expect("failed to dispatch")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        println!("postprocess {}/{} done!!!", ray_count + 1, RAYS_PER_PIXEL);
+        println!();
+
+        let intensities = shared_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
+        /*
+        for offset in 0..6 {
+            let mut intensities = intensities.clone();
+            normalize(&mut intensities);
+            set_alpha_to_1(&mut intensities);
+            let intensities = intensities
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    // 24 = num_images(fblrtb = 6) * num_channels(rgba = 4)
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
+
+            save_as_image_with_out_normalize(
+                &intensities,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("intensities-postprocessed-{}.png", offset.to_string()),
+            );
+        }
+        */
+
+        //scale_intensities(&mut intensities, radius, IMAGE_LENGTH, &distancies);
+        let intensities_left = get_half_of_cube(&intensities, false);
+        let intensities_right = get_half_of_cube(&intensities, true);
+        let distancies_left = get_half_of_cube(&distancies, false);
+        let distancies_right = get_half_of_cube(&distancies, true);
+
+        let impulse_response_left_ray = build_intensity_vec(
+            &distancies_left,
+            &intensities_left,
+            SPEED_OF_SOUND,
+            SAMPLE_RATE,
+        );
+
+        let impulse_response_right_ray = build_intensity_vec(
+            &distancies_right,
+            &intensities_right,
+            SPEED_OF_SOUND,
+            SAMPLE_RATE,
+        );
+
+        //impulse_response_left.resize(impulse_response_left_ray.len(), 0.0);
+        //impulse_response_right.resize(impulse_response_right_ray.len(), 0.0);
+
+        impulse_response_left_ray
+            .iter()
+            .take(impulse_response_left.len())
+            .enumerate()
+            .for_each(|(idx, &v)| impulse_response_left[idx] += v);
+
+        impulse_response_right_ray
+            .iter()
+            .take(impulse_response_right.len())
+            .enumerate()
+            .for_each(|(idx, &v)| impulse_response_right[idx] += v);
+    }
+
+    image_intensities_ave
+        .iter_mut()
+        .for_each(|i| i.iter_mut().for_each(|v| *v /= RAYS_PER_PIXEL as f32));
+
+    image_distancies_ave
+        .iter_mut()
+        .for_each(|i| i.iter_mut().for_each(|v| *v /= RAYS_PER_PIXEL as f32));
+
+    for offset in 0..6 {
+        let dir = match offset {
+            0 => "front",
+            1 => "back",
+            2 => "left",
+            3 => "right",
+            4 => "top",
+            5 => "bottom",
+            _ => unreachable!(),
+        };
+
         save_as_image_with_out_normalize(
-            &intensities,
+            &image_intensities_ave[offset],
             IMAGE_SIZE[0],
             IMAGE_SIZE[1],
-            format!("intensities-postprocessed-{}.png", offset.to_string()),
+            format!("intensities-{}.png", dir),
+        );
+
+        save_as_image_with_out_normalize(
+            &image_distancies_ave[offset],
+            IMAGE_SIZE[0],
+            IMAGE_SIZE[1],
+            format!("distancies-{}.png", dir),
         );
     }
 
-    //scale_intensities(&mut intensities, radius, IMAGE_LENGTH, &distancies);
-    let intensities_left = get_half_of_cube(&intensities, false);
-    let intensities_right = get_half_of_cube(&intensities, true);
-    let distancies_left = get_half_of_cube(&distancies, false);
-    let distancies_right = get_half_of_cube(&distancies, true);
-    let mut impulse_response_left = build_intensity_vec(
-        &distancies_left,
-        &intensities_left,
-        SPEED_OF_SOUND,
-        SAMPLE_RATE,
-    );
+    impulse_response_left
+        .iter_mut()
+        .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
 
-    let mut impulse_response_right = build_intensity_vec(
-        &distancies_right,
-        &intensities_right,
-        SPEED_OF_SOUND,
-        SAMPLE_RATE,
-    );
+    impulse_response_right
+        .iter_mut()
+        .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
 
     //plot(&impulse_response, "ir.pdf");
+
+    println!("filtering...");
 
     const FILTER_WIDTH: usize = 100;
 
@@ -408,19 +612,24 @@ fn main() {
         plot(&impulse_response_filtered, "ir-filtered-right.pdf");
     }
 
-    /*
+    println!("done filtering!!!");
+
     ceil_at(&mut impulse_response_left, 1.0);
     ceil_at(&mut impulse_response_right, 1.0);
-    */
+
+    /*
     let max_left = max_of(&impulse_response_left);
     let max_right = max_of(&impulse_response_right);
     let max = max_left.max(max_right);
 
     impulse_response_left.iter_mut().for_each(|v| *v /= max);
     impulse_response_right.iter_mut().for_each(|v| *v /= max);
+    */
 
     plot(&impulse_response_left, "ir-normalized-left.pdf");
     plot(&impulse_response_right, "ir-normalized-right.pdf");
+
+    println!("building ir...");
 
     let len_left = impulse_response_left.len();
     let len_right = impulse_response_right.len();
@@ -441,6 +650,8 @@ fn main() {
     amplitude(&mut signal, &impulse_response);
 
     write_wav(signal, "ir.wav".to_string());
+
+    println!("done building ir!!!");
 }
 
 fn get_half_of_cube(source: &Vec<f32>, is_right: bool) -> Vec<f32> {

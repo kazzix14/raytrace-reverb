@@ -51,7 +51,11 @@ void compute() {
     //vec3 radius_decay = vec3(4.0 * PI * constants.radius * constants.radius);
     //vec3 image_size_decay = vec3(float(constants.image_length * 6));
     //intensities[idx] /= vec4(dist_decay * radius_decay * image_size_decay, 1.0);
-    intensities[idx] /= vec4(dist_decay, 1.0);
+
+    if (intensities[idx].xyz == vec3(0.0)) 
+        ;
+    else
+        intensities[idx] /= vec4(dist_decay, 1.0);
 }
 
 void main() {

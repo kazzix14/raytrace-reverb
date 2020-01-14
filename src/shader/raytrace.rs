@@ -19,7 +19,7 @@ pub struct SizedRandoms {
 vulkano_shaders::shader! {
     ty: "compute",
     include: [ "src/glsl" ],
-    src: "
+    src: r#"
 #version 450
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
@@ -28,7 +28,6 @@ layout(set = 0, binding = 0) buffer Constants {
     uvec2 image_size;
     float EPS;
     uint reflection_count_limit;
-    uint rays_per_pixel;
     uint num_randoms;
     float ray_length;
     float source_radius;
@@ -45,6 +44,11 @@ layout(set = 0, binding = 2) buffer ImageBuffer {
 layout(set = 0, binding = 3) buffer DistImageBuffer {
     vec4 pixels[][6];
 } dist_image;
+
+layout(set = 0, binding = 4) buffer Model {
+    uint length;
+    vec3 vertices[];
+} model;
 
 struct Ray {
     vec3 origin;
@@ -130,9 +134,9 @@ vec3 random_in_unit_sphere2(float seed) {
     float z;
     do {
         count += 1;
-        vec2 seed1 = gl_GlobalInvocationID.xy + (float(count) + seed);
-        vec2 seed2 = gl_GlobalInvocationID.yz + (float(count) + seed + 1.0);
-        vec2 seed3 = gl_GlobalInvocationID.xz + (float(count) + seed + 2.0);
+        vec2 seed1 = gl_GlobalInvocationID.xy + sin(float(count) + seed);
+        vec2 seed2 = gl_GlobalInvocationID.yz + sin(float(count) + seed + 1.0);
+        vec2 seed3 = gl_GlobalInvocationID.xz + sin(float(count) + seed + 2.0);
         x = 2.0 * rand2(seed1) - 1.0;
         y = 2.0 * rand2(seed2) - 1.0;
         z = 2.0 * rand2(seed3) - 1.0;
@@ -191,9 +195,9 @@ vec3 random_in_unit_sphere(float seed) {
     do {
         count += 0.111222333 * seed;
 
-        x = 2.0 * rand(count + seed1 * 12.34) - 1.0;
-        y = 2.0 * rand(count + seed2 * 45.67) - 1.0;
-        z = 2.0 * rand(count + seed3 * 89.01) - 1.0;
+        x = 2.0 * rand(sin(count + seed1 * 12.34)) - 1.0;
+        y = 2.0 * rand(sin(count + seed2 * 45.67)) - 1.0;
+        z = 2.0 * rand(sin(count + seed3 * 89.01)) - 1.0;
 
         squared_length = x * x + y * y + z * z;
     } while (squared_length >= 1.0);
@@ -334,153 +338,148 @@ void intersectExec(Ray ray, inout Intersection intersection){
 void compute() {
 
     float intensity = 0.0;
-    float distance = 0.0;
-    int hit_count = 0;
-    for (int count = 0; count < constants.rays_per_pixel; count++)
-    {
-        // -1.0 ..= 1.0
-        vec2 p = vec2(gl_GlobalInvocationID.xy) / constants.image_size * vec2(2.0) - vec2(1.0);
-        p.y = -p.y;
+    float distance_ray = 0.0;
+
+    // -1.0 ..= 1.0
+    vec2 p = vec2(gl_GlobalInvocationID.xy) / constants.image_size * vec2(2.0) - vec2(1.0);
+    p.y = -p.y;
     
-        Ray ray;
-        ray.origin = vec3(0.0, 2.0, 4.0);
-        switch(image_id()) {
-            case 0:
-                ray.direction = normalize(vec3(p.x, p.y, -0.5)); // front
+    Ray ray;
+    ray.origin = vec3(0.0, 0.0, 0.0);
+    switch(image_id()) {
+        case 0:
+            ray.direction = normalize(vec3(p.x, p.y, -0.5)); // front
+            break;
+
+        case 1:
+            ray.direction = normalize(vec3(p.x, p.y, 0.5)); // back
+            break;
+
+        case 2:
+            ray.direction = normalize(vec3(-0.5, p.y, p.x)); // left
+            break;
+
+        case 3:
+            ray.direction = normalize(vec3(0.5, p.y, p.x)); // right
+            break;
+
+        case 4:
+            ray.direction = normalize(vec3(p.x, 0.5, p.y)); // top
+            break;
+
+        case 5:
+            ray.direction = normalize(vec3(p.x, -0.5, p.y)); // bottom
+            break;
+    }
+    
+    // sphere init
+    sphere[0].radius = 0.5;
+    sphere[0].position = vec3(0.0, -0.5, sin(1.0));
+    sphere[0].reflection_ratio = 1.0;
+    sphere[0].emission = 0;
+    
+    sphere[1].radius = 0.2;
+    sphere[1].position = vec3(0.0, 0.0, -10.0);
+    sphere[1].reflection_ratio = 1.0;
+    sphere[1].emission = 0;
+    
+    sphere[2].radius = constants.source_radius;
+    sphere[2].position = vec3(0.0, 0.0, -25.0);
+    sphere[2].reflection_ratio = 1.0;
+    sphere[2].emission = 1;
+    
+    // plane init
+    plane[0].position = vec3(0.0, -5.0, 0.0);
+    plane[0].normal = vec3(0.0, 1.0, 0.0);
+    plane[0].reflection_ratio = 1.0;
+    
+    plane[1].position = vec3(0.0, 5.0, 0.0);
+    plane[1].normal = vec3(0.0, -1.0, 0.0);
+    plane[1].reflection_ratio = 1.0;
+    
+    plane[2].position = vec3(-50.0, 0.0, 0.0);
+    plane[2].normal = vec3(1.0, 0.0, 0.0);
+    plane[2].reflection_ratio = 1.0;
+    
+    plane[3].position = vec3(50.0, 0.0, 0.0);
+    plane[3].normal = vec3(-1.0, 0.0, 0.0);
+    plane[3].reflection_ratio = 1.0;
+    
+    plane[4].position = vec3(0.0, 0.0, -30.0);
+    plane[4].normal = vec3(0.0, 0.0, 1.0);
+    plane[4].reflection_ratio = 1.0;
+    
+    plane[5].position = vec3(0.0, 0.0, 5.0);
+    plane[5].normal = vec3(0.0, 0.0, -1.0);
+    plane[5].reflection_ratio = 1.0;
+
+    // init polygon
+    polygon.v0 = vec3(-5.0, 4.0, -20.0);
+    polygon.v1 = vec3(5.0, 4.0, -20.0);
+    polygon.v2 = vec3(-5.0, -4.0, -20.0);
+    polygon.reflection_ratio = 1.0;
+    polygon.diffusion = 0.01;
+
+    // init polygon
+    polygon2.v0 = vec3(5.0, 4.0, -20.0);
+    polygon2.v1 = vec3(5.0, -4.0, -20.0);
+    polygon2.v2 = vec3(-5.0, -4.0, -20.0);
+    polygon2.reflection_ratio = 1.0;
+    polygon2.diffusion = 0.01;
+    
+    // intersection init
+    Intersection its;
+    initialize_intersection(its);
+    
+    // hit check
+    Ray q;
+    intersectExec(ray, its);
+    if(0 < its.hit){
+        for(int j = 1; j < constants.reflection_count_limit; j++){
+            q.origin = its.hitPoint + its.normal * constants.EPS;
+        
+            q.direction = reflect(its.rayDir, its.normal);
+            q.direction = normalize(q.direction);
+            float seed = seed_from_ray_intersection(q, its) - float(j) * 1.34;
+            q.direction += its.diffusion * random_in_unit_sphere(seed);
+            q.direction = normalize(q.direction);
+
+            distance_ray += its.distance;
+            its.distance_to_live -= its.distance;
+
+            its.distance = constants.ray_length;
+
+            if (its.distance_to_live < 0.0) {
                 break;
+            }
+        
+            intersectExec(q, its);
+            its.intensity *= its.intensity_dump_ratio;
+            if(its.hit > j){
+            }
 
-            case 1:
-                ray.direction = normalize(vec3(p.x, p.y, 0.5)); // back
+            if (0 < its.hit_emission) {
                 break;
-
-            case 2:
-                ray.direction = normalize(vec3(-0.5, p.y, p.x)); // left
-                break;
-
-            case 3:
-                ray.direction = normalize(vec3(0.5, p.y, p.x)); // right
-                break;
-
-            case 4:
-                ray.direction = normalize(vec3(p.x, 0.5, p.y)); // top
-                break;
-
-            case 5:
-                ray.direction = normalize(vec3(p.x, -0.5, p.y)); // bottom
-                break;
-        }
-    
-        // sphere init
-        sphere[0].radius = 0.5;
-        sphere[0].position = vec3(0.0, -0.5, sin(1.0));
-        sphere[0].reflection_ratio = 1.0;
-        sphere[0].emission = 0;
-    
-        sphere[1].radius = 1.0;
-        sphere[1].position = vec3(2.0, 0.0, 0.0);
-        sphere[1].reflection_ratio = 1.0;
-        sphere[1].emission = 0;
-    
-        sphere[2].radius = constants.source_radius;
-        sphere[2].position = vec3(-2.0, 0.5, -5.0);
-        sphere[2].reflection_ratio = 1.0;
-        sphere[2].emission = 1;
-    
-        // plane init
-        plane[0].position = vec3(0.0, -5.0, 0.0);
-        plane[0].normal = vec3(0.0, 1.0, 0.0);
-        plane[0].reflection_ratio = 1.0;
-    
-        plane[1].position = vec3(0.0, 5.0, 0.0);
-        plane[1].normal = vec3(0.0, -1.0, 0.0);
-        plane[1].reflection_ratio = 1.0;
-    
-        plane[2].position = vec3(-5.0, 0.0, 0.0);
-        plane[2].normal = vec3(1.0, 0.0, 0.0);
-        plane[2].reflection_ratio = 1.0;
-    
-        plane[3].position = vec3(5.0, 0.0, 0.0);
-        plane[3].normal = vec3(-1.0, 0.0, 0.0);
-        plane[3].reflection_ratio = 1.0;
-    
-        plane[4].position = vec3(0.0, 0.0, -10.0);
-        plane[4].normal = vec3(0.0, 0.0, 1.0);
-        plane[4].reflection_ratio = 1.0;
-    
-        plane[5].position = vec3(0.0, 0.0, 5.0);
-        plane[5].normal = vec3(0.0, 0.0, -1.0);
-        plane[5].reflection_ratio = 1.0;
-
-        // init polygon
-        polygon.v0 = vec3(-4.0, 4.0, 1.0);
-        polygon.v1 = vec3(-4.0, 4.0, -4.0);
-        polygon.v2 = vec3(-4.0, -4.0, 1.0);
-        polygon.reflection_ratio = 1.0;
-        polygon.diffusion = 0.01;
-
-        // init polygon
-        polygon2.v0 = vec3(4.0, 4.0, 1.0);
-        polygon2.v1 = vec3(4.0, 4.0, -4.0);
-        polygon2.v2 = vec3(4.0, -4.0, 1.0);
-        polygon2.reflection_ratio = 1.0;
-        polygon2.diffusion = 1.3;
-    
-        // intersection init
-        Intersection its;
-        initialize_intersection(its);
-    
-        // hit check
-        Ray q;
-        intersectExec(ray, its);
-        if(0 < its.hit){
-            for(int j = 1; j < constants.reflection_count_limit; j++){
-                q.origin = its.hitPoint + its.normal * constants.EPS;
-            
-                q.direction = reflect(its.rayDir, its.normal);
-                q.direction = normalize(q.direction);
-                float seed = seed_from_ray_intersection(q, its) + float(j) * 23.4 - float(count) * 2.23;
-                q.direction += its.diffusion * random_in_unit_sphere(seed);
-                q.direction = normalize(q.direction);
-
-                distance += its.distance;
-                its.distance_to_live -= its.distance;
-
-                its.distance = constants.ray_length;
-
-                if (its.distance_to_live < 0.0) {
-                    break;
-                }
-            
-                intersectExec(q, its);
-                its.intensity *= its.intensity_dump_ratio;
-                if(its.hit > j){
-                }
-
-                if (0 < its.hit_emission) {
-                    break;
-                }
             }
         }
+    }
     
-        if (its.hit_emission == 0) {
-            its.intensity = 0;
-        }
-        else{
-            hit_count += 1;
-        }
-        intensity += its.intensity;
+    if (its.hit_emission == 0) {
+        its.intensity = 0;
     }
 
-    intensity = intensity / float(constants.rays_per_pixel);
-    distance = distance / float(constants.rays_per_pixel);
+    //intensity = intensity / float(constants.rays_per_pixel);
+    intensity = its.intensity;// / float(constants.rays_per_pixel);
+
+    distance_ray += constants.source_radius;
 
     image.pixels[invocation_id()][image_id()] = vec4(vec3(intensity), 1.0);
-    dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(distance), 1.0);
+    dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(distance_ray), 1.0);
 }
 
 
 void main() {
     compute();
 }
-        ",
+"#,
 }
