@@ -47,7 +47,7 @@ layout(set = 0, binding = 3) buffer DistImageBuffer {
 
 layout(set = 0, binding = 4) buffer Model {
     uint length;
-    vec3 vertices[];
+    float vertices[][3];
 } model;
 
 struct Ray {
