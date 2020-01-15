@@ -36,6 +36,7 @@ pub fn load() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
             let rgb = Srgb::new(r, g, b);
             let hsv = Hsv::from(rgb);
             let reflection = hsv.value;
+            let reflection = reflection.sqrt();
 
             let ns = mtl.ns.expect("'ns' does not appeared on .mtl");
             let diffusion = 1.0 - (ns / 900.0);
@@ -61,7 +62,8 @@ pub fn load() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
             object
                 .groups
                 .iter()
-                .flat_map(|group| vec![group.index as u32; group.polys.len()].into_iter())
+                .enumerate()
+                .flat_map(|(index, group)| vec![index as u32; group.polys.len()].into_iter())
         })
         .collect::<Vec<u32>>();
 

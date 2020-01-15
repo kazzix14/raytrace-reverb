@@ -37,7 +37,8 @@ fn main() {
     let (obj_vertices, obj_material_indices, obj_materials) = model::load();
 
     let audio_source_radius = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
-    let ray_length = 340.0 * 5.0;
+    //let ray_length = 340.0 * 5.0;
+    let ray_length = SPEED_OF_SOUND * 10.0;
     let mut rng = rand::thread_rng();
 
     let instance = vulkano::instance::Instance::new(
@@ -186,12 +187,11 @@ fn main() {
             shader::raytrace::ty::Constants {
                 image_size: IMAGE_SIZE,
                 EPS: 0.00001,
-                reflection_count_limit: 512,
+                reflection_count_limit: 1024,
                 num_randoms: NUM_RANDOMS,
                 ray_length: ray_length,
                 source_radius: audio_source_radius,
                 num_model_vertices: num_model_vertices,
-                audio_source_position: [0.0, 0.0, 0.0],
             },
             vulkano::buffer::BufferUsage::all(),
             queue.clone(),
@@ -719,6 +719,14 @@ fn main() {
 
     //plot(&impulse_response, "ir.pdf");
 
+    /*
+    impulse_response_left
+        .iter()
+        .take(1000)
+        .enumerate()
+        .for_each(|(i, v)| println! {"{}: {}", i ,v});
+        */
+
     println!("filtering...");
 
     const FILTER_WIDTH: usize = 100;
@@ -735,17 +743,17 @@ fn main() {
 
     println!("done filtering!!!");
 
-    ceil_at(&mut impulse_response_left, 1.0);
-    ceil_at(&mut impulse_response_right, 1.0);
+    // magic
+    magic(&mut impulse_response_left, 500.0);
+    magic(&mut impulse_response_right, 500.0);
 
-    /*
+    // normalize
     let max_left = max_of(&impulse_response_left);
     let max_right = max_of(&impulse_response_right);
     let max = max_left.max(max_right);
 
     impulse_response_left.iter_mut().for_each(|v| *v /= max);
     impulse_response_right.iter_mut().for_each(|v| *v /= max);
-    */
 
     plot(&impulse_response_left, "ir-normalized-left.pdf");
     plot(&impulse_response_right, "ir-normalized-right.pdf");
@@ -935,6 +943,12 @@ fn max_of(target: &Vec<f32>) -> f32 {
 
 fn ceil_at(target: &mut Vec<f32>, ceil: f32) {
     target.iter_mut().for_each(|v| *v = v.min(ceil));
+}
+
+fn magic(target: &mut Vec<f32>, value: f32) {
+    target
+        .iter_mut()
+        .for_each(|v| *v = if value < *v { 0.0 } else { *v });
 }
 
 fn amplitude(lhs: &mut Vec<[f32; 2]>, rhs: &Vec<[f32; 2]>) {

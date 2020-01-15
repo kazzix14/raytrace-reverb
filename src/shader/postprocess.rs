@@ -49,7 +49,12 @@ void compute() {
     uint idx = invocation_id();
     if (constants.image_length * 6 <= idx) return;
 
-    float m = 0.230259;
+    // alpha = 1.0
+    //float m = 0.230259;
+
+    // alpha = 0.7
+    float m = 0.1611813;
+
     float distance = distancies[idx].x * 0.001;
     float dist_decay = exp(-m * distance); 
 

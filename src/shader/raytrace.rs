@@ -32,7 +32,6 @@ layout(set = 0, binding = 0) buffer Constants {
     float ray_length;
     float source_radius;
     uint num_model_vertices;
-    vec3 audio_source_position;
 } constants;
 
 layout(set = 0, binding = 1) buffer Randoms {
@@ -177,9 +176,9 @@ float random_hash(int seed) {
 }
 
 float rand(float seed) {
-    float r1 = fract(sin(dot(vec2(seed, random_hash(int(seed*2.3))), vec2(12.9898,78.233))) * 43758.5453);
-    float r2 = fract(sin(dot(vec2(r1, random_hash(int(r1*3.88))), vec2(12.9898,78.233))) * 43758.5453);
-    return fract(sin(seed + r1 - r2));
+    float r1 = fract(sin(dot(vec2(seed, 23.1395861 * random_hash(int(seed*2.3))), vec2(12.9898,78.233))) * 43758.5453);
+    float r2 = fract(sin(dot(vec2(r1, 17.234565 * random_hash(int(r1*3.88))), vec2(12.9898,78.233))) * 43758.5453);
+    return fract(sin(r1 - r2));
 }
 
 vec3 random_in_unit_sphere(float seed) {
@@ -202,9 +201,9 @@ vec3 random_in_unit_sphere(float seed) {
     do {
         count += 0.111222333 * seed;
 
-        x = 2.0 * rand((count + seed1 * 12.34)) - 1.0;
-        y = 2.0 * rand((count + seed2 * 45.67)) - 1.0;
-        z = 2.0 * rand((count + seed3 * 89.01)) - 1.0;
+        x = 2.0 * rand((count + seed1 * 1.234)) - 1.0;
+        y = 2.0 * rand((count + seed2 * 4.567)) - 1.0;
+        z = 2.0 * rand((count + seed3 * 8.901)) - 1.0;
 
         squared_length = x * x + y * y + z * z;
     } while (squared_length >= 1.0);
@@ -339,7 +338,7 @@ void intersect_all(Ray ray, inout Intersection intersection){
     for(uint index = 0; index < constants.num_model_vertices; index += 3) {
         uint i = index;
 
-        uint material_index = material_indices.indices[index];
+        uint material_index = material_indices.indices[i/3];
         vec3 material = materials.materials[material_index];
         float reflection = material.x;
         float diffusion = material.y;
@@ -360,8 +359,7 @@ void intersect_all(Ray ray, inout Intersection intersection){
         intersect_polygon(ray, p, intersection);
     }
 
-
-    intersect_sphere(ray, audio_source, intersection);
+    //intersect_sphere(ray, audio_source, intersection);
 }
 
 void compute() {
@@ -429,7 +427,7 @@ void compute() {
             distance_ray += its.distance;
             its.distance_to_live -= its.distance;
 
-            //its.distance = constants.ray_length;
+            its.distance = constants.ray_length;
 
             if (its.distance_to_live < 0.0) {
                 break;
@@ -460,8 +458,8 @@ void compute() {
     distance_ray += constants.source_radius;
 
     image.pixels[invocation_id()][image_id()] = vec4(vec3(intensity), 1.0);
-    //dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(distance_ray), 1.0);
-    dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(its.distance), 1.0);
+    dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(distance_ray), 1.0);
+    //dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(its.distance), 1.0);
 }
 
 
