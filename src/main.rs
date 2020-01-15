@@ -1,7 +1,7 @@
-mod obj;
+mod model;
 mod shader;
 
-use crate::color::Color;
+//use crate::color::Color;
 use rand::prelude::*;
 use std::sync::Arc;
 use vulkano;
@@ -12,7 +12,7 @@ use vulkano::sync::GpuFuture;
 const SPEED_OF_SOUND: f32 = 340.0;
 
 const SAMPLE_RATE: u32 = 44100;
-const RAYS_PER_PIXEL: u32 = 1;
+const RAYS_PER_PIXEL: u32 = 2;
 
 const IMAGE_SIZE: [u32; 2] = [1024, 1024];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
@@ -34,10 +34,10 @@ const NUM_DISPATCH_POSTPROCESS: [u32; 3] = [
 const NUM_RANDOMS: u32 = 317;
 
 fn main() {
-    let obj_vertices = obj::vertices();
+    let (obj_vertices, obj_material_indices, obj_materials) = model::load();
 
     let audio_source_radius = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
-    let ray_length = 340.0;
+    let ray_length = 340.0 * 5.0;
     let mut rng = rand::thread_rng();
 
     let instance = vulkano::instance::Instance::new(
@@ -145,15 +145,53 @@ fn main() {
     }
     .unwrap();
 
+    let num_model_vertices = obj_vertices.len() as u32 / 4;
+
+    let size_model_vertices = obj_vertices.len() * 4;
+    let size_model_material_indices = obj_material_indices.len() * 4;
+    let size_model_materials = obj_materials.len() * 4;
+
+    /*
+        vertices : [
+            [v0, v1, v2, _],
+            [v0, v1, v2, _],
+            [v0, v1, v2, _],
+            .
+            .
+            .
+        ]
+
+        material_indices : [
+            [i1],
+            [i2],
+            [i3],
+            .
+            .
+            .
+        ]
+
+        materials : [
+            [r1, d1, _, _],
+            [r1, d1, _, _],
+            [r1, d1, _, _],
+            .
+            .
+            .
+        ]
+    */
+    assert_eq!(num_model_vertices % 3, 0);
+
     let (local_constants_buffer, local_constants_buffer_submit_command) =
         vulkano::buffer::ImmutableBuffer::from_data(
             shader::raytrace::ty::Constants {
                 image_size: IMAGE_SIZE,
-                EPS: 0.000001,
-                reflection_count_limit: 4096,
+                EPS: 0.00001,
+                reflection_count_limit: 512,
                 num_randoms: NUM_RANDOMS,
-                ray_length: ray_length, // 3 s
+                ray_length: ray_length,
                 source_radius: audio_source_radius,
+                num_model_vertices: num_model_vertices,
+                audio_source_position: [0.0, 0.0, 0.0],
             },
             vulkano::buffer::BufferUsage::all(),
             queue.clone(),
@@ -166,21 +204,24 @@ fn main() {
         .wait(None)
         .unwrap();
 
-    let model_buffer_length = 4 + obj_vertices.len() * 4;
-    let (local_model_buffer, local_model_buffer_init) = unsafe {
+    /*
+        construct model vertices
+    */
+
+    let (local_model_vertices_buffer, local_model_vertices_buffer_init) = unsafe {
         vulkano::buffer::ImmutableBuffer::raw(
             device.clone(),
-            model_buffer_length,
+            size_model_vertices,
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
     }
     .unwrap();
 
-    let shared_model_buffer = unsafe {
+    let shared_model_vertices_buffer = unsafe {
         vulkano::buffer::CpuAccessibleBuffer::<[f32]>::raw(
             device.clone(),
-            model_buffer_length,
+            size_model_vertices,
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
@@ -188,14 +229,78 @@ fn main() {
     .unwrap();
 
     {
-        let mut write_lock = shared_model_buffer.write().unwrap();
-        write_lock.iter_mut().enumerate().for_each(|(i, v)| {
-            *v = match i {
-                0 => unsafe { *(&(obj_vertices.len() as u32) as *const u32 as *const f32) },
-                i => obj_vertices[i - 1],
-            }
-        });
+        let mut write_lock = shared_model_vertices_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_vertices)
+            .for_each(|(p, v)| *p = v);
     }
+
+    /*
+        construct model material indices
+    */
+
+    let (local_model_material_indices_buffer, local_model_material_indices_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            size_model_material_indices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_material_indices_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[u32]>::raw(
+            device.clone(),
+            size_model_material_indices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_material_indices_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_material_indices)
+            .for_each(|(p, v)| *p = v);
+    }
+
+    /*
+        construct model materials
+    */
+
+    let (local_model_materials_buffer, local_model_materials_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            size_model_materials,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_materials_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[f32]>::raw(
+            device.clone(),
+            size_model_materials,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_materials_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_materials)
+            .for_each(|(p, v)| *p = v);
+    }
+
+    // // // // // // // // // // // // // //
 
     let compute_pipeline = Arc::new(
         vulkano::pipeline::ComputePipeline::new(
@@ -220,7 +325,11 @@ fn main() {
         .expect("failed to add local image buffer")
         .add_buffer(local_dist_image_buffer.clone())
         .expect("failed to add dist local image buffer")
-        .add_buffer(local_model_buffer.clone())
+        .add_buffer(local_model_vertices_buffer.clone())
+        .expect("failed to add local model buffer")
+        .add_buffer(local_model_material_indices_buffer.clone())
+        .expect("failed to add local model buffer")
+        .add_buffer(local_model_materials_buffer.clone())
         .expect("failed to add local model buffer")
         .build()
         .expect("failed to create descriptor set"),
@@ -262,10 +371,22 @@ fn main() {
         (ray_length / SPEED_OF_SOUND as f32 * SAMPLE_RATE as f32) as usize,
         0.0,
     );
-
     vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
         .expect("failed to create command buffer builder")
-        .copy_buffer(shared_model_buffer.clone(), local_model_buffer_init.clone())
+        .copy_buffer(
+            shared_model_vertices_buffer.clone(),
+            local_model_vertices_buffer_init.clone(),
+        )
+        .expect("failed to copy buffer")
+        .copy_buffer(
+            shared_model_material_indices_buffer.clone(),
+            local_model_material_indices_buffer_init.clone(),
+        )
+        .expect("failed to copy buffer")
+        .copy_buffer(
+            shared_model_materials_buffer.clone(),
+            local_model_materials_buffer_init.clone(),
+        )
         .expect("failed to copy buffer")
         .build()
         .expect("failed to build command buffer")
