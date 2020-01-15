@@ -29,6 +29,7 @@ layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) buffer Constants {
     float radius;
     uint image_length;
+    uint rays_per_pixel;
 } constants;
 
 layout(set = 0, binding = 1) buffer Intensities {
@@ -37,6 +38,10 @@ layout(set = 0, binding = 1) buffer Intensities {
 
 layout(set = 0, binding = 2) buffer Distancies {
     vec4 distancies[];
+};
+
+layout(set = 0, binding = 3) buffer Reflections {
+    vec4 reflections[];
 };
 
 uint invocation_id() {
@@ -58,10 +63,17 @@ void compute() {
     float distance = distancies[idx].x * 0.001;
     float dist_decay = exp(-m * distance); 
 
+    float rays_per_pixel_decay = 1.0 / float(constants.rays_per_pixel);
+    float num_channels_decay = 1.0 / 4.0;
+
+    float reflection = reflections[idx].x;
+
+    float decay = dist_decay * num_channels_decay * reflection;
+
     if (intensities[idx].xyz == vec3(0.0)) 
         ;
     else
-        intensities[idx] *= vec4(vec3(dist_decay), 1.0);
+        intensities[idx] *= vec4(decay);
 }
 
 void main() {

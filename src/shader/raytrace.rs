@@ -46,15 +46,19 @@ layout(set = 0, binding = 3) buffer DistImageBuffer {
     vec4 pixels[][6];
 } dist_image;
 
-layout(set = 0, binding = 4) buffer ModelVertices {
+layout(set = 0, binding = 4) buffer ReflectImageBuffer {
+    vec4 pixels[][6];
+} reflect_image;
+
+layout(set = 0, binding = 5) buffer ModelVertices {
     vec3 vertices[];
 } model;
 
-layout(set = 0, binding = 5) buffer ModelMaterialIndices {
+layout(set = 0, binding = 6) buffer ModelMaterialIndices {
     uint indices[];
 } material_indices;
 
-layout(set = 0, binding = 6) buffer ModelMaterials {
+layout(set = 0, binding = 7) buffer ModelMaterials {
     vec3 materials[];
 } materials;
 
@@ -70,13 +74,13 @@ const float dump_ratio = 0.000000;
 const float particle_density = 1.0;
 const float particle_try_dist = 0.0;
 const float particle_probability = 0.0000;
-const float particle_reflection_ratio = 1.00;
+const float particle_reflection = 1.00;
 */
 
 struct Sphere {
     float radius;
     vec3  position;
-    float reflection_ratio;
+    float reflection;
     // boolean
     int emission;
 };
@@ -84,14 +88,14 @@ struct Sphere {
 struct Plane {
     vec3 position;
     vec3 normal;
-    float reflection_ratio;
+    float reflection;
 };
 
 struct Polygon {
     vec3 v0;
     vec3 v1;
     vec3 v2;
-    float reflection_ratio;
+    float reflection;
     float diffusion;
     int emission;
 };
@@ -104,7 +108,7 @@ struct Intersection {
     float distance;
     vec3  rayDir;
     float intensity;
-    float intensity_dump_ratio;
+    float reflection;
     float diffusion;
     float distance_to_live;
 };
@@ -115,7 +119,7 @@ const float rand_ratio = 0.47;
 const float particle_density = 1.0;
 const float particle_try_dist = 0.0;
 const float particle_probability = 0.0000;
-const float particle_reflection_ratio = 1.00;
+const float particle_reflection = 1.00;
 
 Sphere audio_source;
 
@@ -227,7 +231,7 @@ void initialize_intersection(inout Intersection intersection) {
     intersection.distance = constants.ray_length;
     intersection.rayDir   = vec3(0.0);
     intersection.hit_emission = 0;
-    intersection.intensity_dump_ratio = 1.0;
+    intersection.reflection = 1.0;
     intersection.diffusion = 1.0;
     intersection.distance_to_live = constants.ray_length;
 }
@@ -243,7 +247,7 @@ void intersect_particle(Ray ray, inout Intersection intersection) {
             intersection.distance = dist;
             intersection.hit++;
             intersection.rayDir = ray.direction;
-            intersection.intensity_dump_ratio *= particle_reflection_ratio;
+            intersection.reflection *= particle_reflection;
             break;
         }
     }
@@ -267,12 +271,12 @@ void intersect_sphere(Ray ray, Sphere sphere, inout Intersection intersection){
     
         if(sphere.emission == 1) {
             intersection.hit_emission = 1;
-            intersection.intensity_dump_ratio = 1.0;
+            intersection.reflection = 1.0;
         }
         else
         {
             intersection.hit_emission = 0;
-            intersection.intensity_dump_ratio = sphere.reflection_ratio;
+            intersection.reflection = sphere.reflection;
         }
     }
 }
@@ -288,7 +292,7 @@ void intersect_plane(Ray ray, Plane plane, inout Intersection intersection){
         intersection.hit++;
         intersection.rayDir = ray.direction;
         intersection.diffusion = rand_ratio;
-        intersection.intensity_dump_ratio = plane.reflection_ratio;
+        intersection.reflection = plane.reflection;
     }
 }
 
@@ -322,12 +326,12 @@ void intersect_polygon(Ray ray, Polygon polygon, inout Intersection intersection
     
         if(polygon.emission == 1) {
             intersection.hit_emission = 1;
-            intersection.intensity_dump_ratio = 1.0;
+            intersection.reflection = 1.0;
         }
         else
         {
             intersection.hit_emission = 0;
-            intersection.intensity_dump_ratio = polygon.reflection_ratio;
+            intersection.reflection = polygon.reflection;
         }
     }
 }
@@ -366,6 +370,7 @@ void compute() {
 
     float intensity = 0.0;
     float distance_ray = 0.0;
+    float reflection = 1.0;
 
     // -1.0 ..= 1.0
     vec2 p = vec2(gl_GlobalInvocationID.xy) / constants.image_size * vec2(2.0) - vec2(1.0);
@@ -401,7 +406,7 @@ void compute() {
     
     audio_source.radius = constants.source_radius;
     audio_source.position = vec3(0.0, 0.0, -2.0);
-    audio_source.reflection_ratio = 1.0;
+    audio_source.reflection = 1.0;
     audio_source.emission = 1;
     
     // intersection init
@@ -413,7 +418,7 @@ void compute() {
     intersect_all(ray, its);
     if(0 < its.hit && its.hit_emission <= 0) {
         its.hit = 0;
-        its.intensity *= its.intensity_dump_ratio;
+        reflection *= its.reflection;
 
         for(int j = 1; j < constants.reflection_count_limit; j++){
             q.origin = its.hitPoint + its.normal * constants.EPS;
@@ -445,7 +450,7 @@ void compute() {
 
             its.hit = 0;
 
-            its.intensity *= its.intensity_dump_ratio;
+            reflection *= its.reflection;
         }
     }
     
@@ -457,9 +462,10 @@ void compute() {
 
     distance_ray += constants.source_radius;
 
-    image.pixels[invocation_id()][image_id()] = vec4(vec3(intensity), 1.0);
-    dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(distance_ray), 1.0);
-    //dist_image.pixels[invocation_id()][image_id()] = vec4(vec3(its.distance), 1.0);
+    image.pixels[invocation_id()][image_id()] = vec4(intensity);
+    dist_image.pixels[invocation_id()][image_id()] = vec4(distance_ray);
+    reflect_image.pixels[invocation_id()][image_id()] = vec4(reflection);
+    //dist_image.pixels[invocation_id()][image_id()] = vec4(its.distance);
 }
 
 

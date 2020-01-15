@@ -100,6 +100,16 @@ fn main() {
     }
     .unwrap();
 
+    let local_reflect_image_buffer = unsafe {
+        vulkano::buffer::DeviceLocalBuffer::raw(
+            device.clone(),
+            IMAGE_LENGTH * 4 * 4 * 6,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
     let shared_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
         vulkano::buffer::BufferUsage::all(),
@@ -108,6 +118,13 @@ fn main() {
     .unwrap();
 
     let shared_dist_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
+        device.clone(),
+        vulkano::buffer::BufferUsage::all(),
+        (0..IMAGE_LENGTH * 4 * 6).map(|_| 0.0 as f32),
+    )
+    .unwrap();
+
+    let shared_reflect_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
         vulkano::buffer::BufferUsage::all(),
         (0..IMAGE_LENGTH * 4 * 6).map(|_| 0.0 as f32),
@@ -325,6 +342,8 @@ fn main() {
         .expect("failed to add local image buffer")
         .add_buffer(local_dist_image_buffer.clone())
         .expect("failed to add dist local image buffer")
+        .add_buffer(local_reflect_image_buffer.clone())
+        .expect("failed to add dist local image buffer")
         .add_buffer(local_model_vertices_buffer.clone())
         .expect("failed to add local model buffer")
         .add_buffer(local_model_material_indices_buffer.clone())
@@ -445,6 +464,11 @@ fn main() {
                 shared_dist_image_buffer.clone(),
             )
             .expect("failed to copy buffer")
+            .copy_buffer(
+                local_reflect_image_buffer.clone(),
+                shared_reflect_image_buffer.clone(),
+            )
+            .expect("failed to copy buffer")
             .build()
             .expect("failed to build command buffer")
             .execute(queue.clone())
@@ -464,6 +488,13 @@ fn main() {
             .collect::<Vec<f32>>();
 
         let distancies = shared_dist_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
+
+        let reflections = shared_reflect_image_buffer
             .read()
             .expect("failed to read content")
             .iter()
@@ -545,6 +576,7 @@ fn main() {
                 shader::postprocess::ty::Constants {
                     radius: audio_source_radius,
                     image_length: IMAGE_LENGTH as u32,
+                    rays_per_pixel: RAYS_PER_PIXEL,
                 },
                 vulkano::buffer::BufferUsage::all(),
                 queue.clone(),
@@ -579,6 +611,8 @@ fn main() {
             .add_buffer(shared_image_buffer.clone())
             .expect("failed to add local image buffer")
             .add_buffer(shared_dist_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .add_buffer(shared_reflect_image_buffer.clone())
             .expect("failed to add local image buffer")
             .build()
             .expect("failed to create descriptor set"),
@@ -709,6 +743,7 @@ fn main() {
         );
     }
 
+    /*
     impulse_response_left
         .iter_mut()
         .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
@@ -716,6 +751,7 @@ fn main() {
     impulse_response_right
         .iter_mut()
         .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
+        */
 
     //plot(&impulse_response, "ir.pdf");
 
@@ -727,6 +763,7 @@ fn main() {
         .for_each(|(i, v)| println! {"{}: {}", i ,v});
         */
 
+    /*
     println!("filtering...");
 
     const FILTER_WIDTH: usize = 100;
@@ -742,6 +779,7 @@ fn main() {
     }
 
     println!("done filtering!!!");
+    */
 
     // magic
     magic(&mut impulse_response_left, 500.0);
