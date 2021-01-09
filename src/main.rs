@@ -14,7 +14,7 @@ const SPEED_OF_SOUND: f32 = 340.0;
 const SAMPLE_RATE: u32 = 44100;
 const RAYS_PER_PIXEL: u32 = 2;
 
-const IMAGE_SIZE: [u32; 2] = [1024, 1024];
+const IMAGE_SIZE: [u32; 2] = [512, 512];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
@@ -34,7 +34,16 @@ const NUM_DISPATCH_POSTPROCESS: [u32; 3] = [
 const NUM_RANDOMS: u32 = 317;
 
 fn main() {
-    let (obj_vertices, obj_material_indices, obj_materials) = model::load();
+    let matches = clap::App::new("Raytrace IR")
+        .version("0.0.1")
+        .author("Kazuma Murata. <kazzix14@gmail.com>")
+        .about("Create IR from 3d models")
+        .arg(clap::Arg::with_name("input 3d model").short("i").long("input").value_name("INPUT").help("Sets the input 3d model").takes_value(true)).get_matches();
+
+    let input = matches.value_of("input 3d model").expect("input file path need to be passed");
+    println!("Using input file: {}", input);
+
+    let (obj_vertices, obj_material_indices, obj_materials) = model::load(input.to_string());
 
     let audio_source_radius = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
     //let ray_length = 340.0 * 5.0;
@@ -52,7 +61,7 @@ fn main() {
     physical_devices.for_each(|pd| println!("{} {:?}: {}", pd.index(), pd.ty(), pd.name()));
 
     let physical_device =
-        vulkano::instance::PhysicalDevice::from_index(&instance, 2).expect("failed to find device");
+        vulkano::instance::PhysicalDevice::from_index(&instance, 0).expect("failed to find device");
 
     println!(
         "using {} {:?}: {}",
