@@ -2,10 +2,10 @@ use obj::*;
 use palette::*;
 use std::path::Path;
 
-pub fn load() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+pub fn load(path: String) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
     // ns -> roughness
     // ka ->
-    let mut obj = Obj::<SimplePolygon>::load(Path::new("resources/models/cube.obj")).unwrap();
+    let mut obj = Obj::<SimplePolygon>::load(Path::new(&path)).unwrap();
     obj.load_mtls();
     //dbg!(obj.objects.clone());
 

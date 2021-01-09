@@ -60,8 +60,16 @@ fn main() {
     println!("{} device(s) found", physical_devices.len());
     physical_devices.for_each(|pd| println!("{} {:?}: {}", pd.index(), pd.ty(), pd.name()));
 
+    let input = dialoguer::Input::<String>::new()
+        .with_prompt("choose a GPU")
+        .show_default(true)
+        .default("0".into())
+        .interact_text().unwrap();
+
+    let gpu_idx = input.parse::<usize>().expect("failed to parse input as integer");
+
     let physical_device =
-        vulkano::instance::PhysicalDevice::from_index(&instance, 0).expect("failed to find device");
+        vulkano::instance::PhysicalDevice::from_index(&instance, gpu_idx).expect("failed to find device");
 
     println!(
         "using {} {:?}: {}",
