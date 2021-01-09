@@ -1,4 +1,8 @@
-use crate::color::Color;
+mod model;
+mod shader;
+
+//use crate::color::Color;
+use rand::prelude::*;
 use std::sync::Arc;
 use vulkano;
 use vulkano::command_buffer::CommandBuffer;
@@ -8,18 +12,35 @@ use vulkano::sync::GpuFuture;
 const SPEED_OF_SOUND: f32 = 340.0;
 
 const SAMPLE_RATE: u32 = 44100;
+const RAYS_PER_PIXEL: u32 = 2;
 
-const IMAGE_SIZE: [u32; 2] = [2048, 2048];
+const IMAGE_SIZE: [u32; 2] = [1024, 1024];
 const IMAGE_LENGTH: usize = (IMAGE_SIZE[0] * IMAGE_SIZE[1]) as usize;
 
 const WORKGROUP_SIZE: [u32; 3] = [32, 32, 1];
 const NUM_DISPATCH: [u32; 3] = [
     IMAGE_SIZE[0] / WORKGROUP_SIZE[0],
     IMAGE_SIZE[1] / WORKGROUP_SIZE[1],
+    6,
+];
+
+const WORKGROUP_SIZE_POSTPROCESS: [u32; 3] = [1024, 1, 1];
+const NUM_DISPATCH_POSTPROCESS: [u32; 3] = [
+    (IMAGE_LENGTH as u32 * 6) / WORKGROUP_SIZE_POSTPROCESS[0] + 1,
+    1,
     1,
 ];
 
+const NUM_RANDOMS: u32 = 317;
+
 fn main() {
+    let (obj_vertices, obj_material_indices, obj_materials) = model::load();
+
+    let audio_source_radius = (1.0 / 4.0 / std::f32::consts::PI).sqrt();
+    //let ray_length = 340.0 * 5.0;
+    let ray_length = SPEED_OF_SOUND * 10.0;
+    let mut rng = rand::thread_rng();
+
     let instance = vulkano::instance::Instance::new(
         None,
         &vulkano::instance::InstanceExtensions::none(),
@@ -56,80 +77,253 @@ fn main() {
 
     let queue = quques.next().unwrap();
 
-    let compute_shader =
-        compute_shader::Shader::load(device.clone()).expect("failed to load compute shader");
-
-    /*
-    let cep = unsafe {
-        compute_shader.module().compute_entry_point(
-            std::ffi::CStr::from_ptr("initialize".as_ptr() as *const i8),
-            vulkano::descriptor::pipeline_layout::EmptyPipelineDesc,
-        )
-    };
-    */
-
-    //let local_image_buffer = vulkano::buffer::DeviceLocalBuffer::<compute_shader::Image>::new(
-    //    device.clone(),
-    //    vulkano::buffer::BufferUsage::all(),
-    //    device.clone().physical_device().queue_families(),
-    //)
-    //.unwrap();
+    let raytrace_shader =
+        shader::raytrace::Shader::load(device.clone()).expect("failed to load compute shader");
 
     let local_image_buffer = unsafe {
         vulkano::buffer::DeviceLocalBuffer::raw(
             device.clone(),
-            IMAGE_LENGTH * 4 * 4,
+            IMAGE_LENGTH * 4 * 4 * 6,
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
-        .unwrap()
-    };
+    }
+    .unwrap();
 
     let local_dist_image_buffer = unsafe {
         vulkano::buffer::DeviceLocalBuffer::raw(
             device.clone(),
-            IMAGE_LENGTH * 4 * 4,
+            IMAGE_LENGTH * 4 * 4 * 6,
             vulkano::buffer::BufferUsage::all(),
             device.clone().physical_device().queue_families(),
         )
-        .unwrap()
-    };
+    }
+    .unwrap();
 
-    //let shared_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_data(
-    //    device.clone(),
-    //    vulkano::buffer::BufferUsage::all(),
-    //    compute_shader::Image::default(),
-    //)
-    //.unwrap();
+    let local_reflect_image_buffer = unsafe {
+        vulkano::buffer::DeviceLocalBuffer::raw(
+            device.clone(),
+            IMAGE_LENGTH * 4 * 4 * 6,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
 
     let shared_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
         vulkano::buffer::BufferUsage::all(),
-        (0..IMAGE_LENGTH * 4).map(|_| 0.0 as f32),
+        (0..IMAGE_LENGTH * 4 * 6).map(|_| 0.0 as f32),
     )
     .unwrap();
 
     let shared_dist_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
         vulkano::buffer::BufferUsage::all(),
-        (0..IMAGE_LENGTH * 4).map(|_| 0.0 as f32),
+        (0..IMAGE_LENGTH * 4 * 6).map(|_| 0.0 as f32),
     )
     .unwrap();
 
-    let shared_constants_buffer = vulkano::buffer::CpuAccessibleBuffer::from_data(
+    let shared_reflect_image_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
         device.clone(),
         vulkano::buffer::BufferUsage::all(),
-        compute_shader::Constants {
-            image_size: IMAGE_SIZE,
-        },
+        (0..IMAGE_LENGTH * 4 * 6).map(|_| 0.0 as f32),
     )
     .unwrap();
+
+    /*
+    let (local_randoms_buffer, local_randoms_buffer_submit_command) =
+        vulkano::buffer::ImmutableBuffer::from_data(
+            shader::raytrace::SizedRandoms {
+                randoms: {
+                    let mut randoms = [0.0; NUM_RANDOMS as usize];
+                    randoms.iter_mut().for_each(|v| *v = rng.gen());
+                    randoms
+                },
+            },
+            vulkano::buffer::BufferUsage::all(),
+            queue.clone(),
+        )
+        .unwrap();
+
+    local_randoms_buffer_submit_command
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+        */
+
+    let local_randoms_buffer = unsafe {
+        vulkano::buffer::DeviceLocalBuffer::raw(
+            device.clone(),
+            4 * NUM_RANDOMS as usize,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let num_model_vertices = obj_vertices.len() as u32 / 4;
+
+    let size_model_vertices = obj_vertices.len() * 4;
+    let size_model_material_indices = obj_material_indices.len() * 4;
+    let size_model_materials = obj_materials.len() * 4;
+
+    /*
+        vertices : [
+            [v0, v1, v2, _],
+            [v0, v1, v2, _],
+            [v0, v1, v2, _],
+            .
+            .
+            .
+        ]
+
+        material_indices : [
+            [i1],
+            [i2],
+            [i3],
+            .
+            .
+            .
+        ]
+
+        materials : [
+            [r1, d1, _, _],
+            [r1, d1, _, _],
+            [r1, d1, _, _],
+            .
+            .
+            .
+        ]
+    */
+    assert_eq!(num_model_vertices % 3, 0);
+
+    let (local_constants_buffer, local_constants_buffer_submit_command) =
+        vulkano::buffer::ImmutableBuffer::from_data(
+            shader::raytrace::ty::Constants {
+                image_size: IMAGE_SIZE,
+                EPS: 0.00001,
+                reflection_count_limit: 1024,
+                num_randoms: NUM_RANDOMS,
+                ray_length: ray_length,
+                source_radius: audio_source_radius,
+                num_model_vertices: num_model_vertices,
+            },
+            vulkano::buffer::BufferUsage::all(),
+            queue.clone(),
+        )
+        .unwrap();
+
+    local_constants_buffer_submit_command
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+
+    /*
+        construct model vertices
+    */
+
+    let (local_model_vertices_buffer, local_model_vertices_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            size_model_vertices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_vertices_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[f32]>::raw(
+            device.clone(),
+            size_model_vertices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_vertices_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_vertices)
+            .for_each(|(p, v)| *p = v);
+    }
+
+    /*
+        construct model material indices
+    */
+
+    let (local_model_material_indices_buffer, local_model_material_indices_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            size_model_material_indices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_material_indices_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[u32]>::raw(
+            device.clone(),
+            size_model_material_indices,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_material_indices_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_material_indices)
+            .for_each(|(p, v)| *p = v);
+    }
+
+    /*
+        construct model materials
+    */
+
+    let (local_model_materials_buffer, local_model_materials_buffer_init) = unsafe {
+        vulkano::buffer::ImmutableBuffer::raw(
+            device.clone(),
+            size_model_materials,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    let shared_model_materials_buffer = unsafe {
+        vulkano::buffer::CpuAccessibleBuffer::<[f32]>::raw(
+            device.clone(),
+            size_model_materials,
+            vulkano::buffer::BufferUsage::all(),
+            device.clone().physical_device().queue_families(),
+        )
+    }
+    .unwrap();
+
+    {
+        let mut write_lock = shared_model_materials_buffer.write().unwrap();
+        write_lock
+            .iter_mut()
+            .zip(obj_materials)
+            .for_each(|(p, v)| *p = v);
+    }
+
+    // // // // // // // // // // // // // //
 
     let compute_pipeline = Arc::new(
         vulkano::pipeline::ComputePipeline::new(
             device.clone(),
             //&cep,
-            &compute_shader.main_entry_point(),
+            &raytrace_shader.main_entry_point(),
             &(),
         )
         .expect("failed to create compute pipeline"),
@@ -140,28 +334,109 @@ fn main() {
             compute_pipeline.clone(),
             0,
         )
-        .add_buffer(shared_constants_buffer.clone())
-        .expect("failed to add shared constants buffer")
+        .add_buffer(local_constants_buffer.clone())
+        .expect("failed to add local constants buffer")
+        .add_buffer(local_randoms_buffer.clone())
+        .expect("failed to add local randoms buffer")
         .add_buffer(local_image_buffer.clone())
         .expect("failed to add local image buffer")
         .add_buffer(local_dist_image_buffer.clone())
-        .expect("failed to add local image buffer")
+        .expect("failed to add dist local image buffer")
+        .add_buffer(local_reflect_image_buffer.clone())
+        .expect("failed to add dist local image buffer")
+        .add_buffer(local_model_vertices_buffer.clone())
+        .expect("failed to add local model buffer")
+        .add_buffer(local_model_material_indices_buffer.clone())
+        .expect("failed to add local model buffer")
+        .add_buffer(local_model_materials_buffer.clone())
+        .expect("failed to add local model buffer")
         .build()
         .expect("failed to create descriptor set"),
     );
 
-    let image = vulkano::image::StorageImage::new(
-        device.clone(),
-        vulkano::image::Dimensions::Dim2d {
-            width: IMAGE_SIZE[0],
-            height: IMAGE_SIZE[1],
-        },
-        vulkano::format::R8G8B8A8Unorm,
-        Some(queue.family()),
-    )
-    .unwrap();
+    let mut image_distancies_ave = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    image_distancies_ave
+        .iter_mut()
+        .for_each(|i| i.resize(IMAGE_LENGTH * 4, 0.0));
 
-    let command_buffer =
+    let mut image_intensities_ave = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    image_intensities_ave
+        .iter_mut()
+        .for_each(|i| i.resize(IMAGE_LENGTH * 4, 0.0));
+
+    let mut impulse_response_left = Vec::new();
+    let mut impulse_response_right = Vec::new();
+
+    impulse_response_left.resize(
+        (ray_length / SPEED_OF_SOUND as f32 * SAMPLE_RATE as f32) as usize,
+        0.0,
+    );
+
+    impulse_response_right.resize(
+        (ray_length / SPEED_OF_SOUND as f32 * SAMPLE_RATE as f32) as usize,
+        0.0,
+    );
+    vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+        .expect("failed to create command buffer builder")
+        .copy_buffer(
+            shared_model_vertices_buffer.clone(),
+            local_model_vertices_buffer_init.clone(),
+        )
+        .expect("failed to copy buffer")
+        .copy_buffer(
+            shared_model_material_indices_buffer.clone(),
+            local_model_material_indices_buffer_init.clone(),
+        )
+        .expect("failed to copy buffer")
+        .copy_buffer(
+            shared_model_materials_buffer.clone(),
+            local_model_materials_buffer_init.clone(),
+        )
+        .expect("failed to copy buffer")
+        .build()
+        .expect("failed to build command buffer")
+        .execute(queue.clone())
+        .expect("failed to execute command buffer")
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+
+    for ray_count in 0..RAYS_PER_PIXEL {
+        let shared_randoms_buffer = vulkano::buffer::CpuAccessibleBuffer::from_iter(
+            device.clone(),
+            vulkano::buffer::BufferUsage::all(),
+            (0..NUM_RANDOMS).map(|_| rng.gen::<f32>()),
+        )
+        .unwrap();
+
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .copy_buffer(shared_randoms_buffer.clone(), local_randoms_buffer.clone())
+            .expect("failed to copy buffer")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
         vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
             .expect("failed to create command buffer builder")
             .dispatch(
@@ -179,7 +454,7 @@ fn main() {
             .unwrap()
             .wait(None)
             .unwrap();
-    let command_buffer =
+
         vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
             .expect("failed to create command buffer builder")
             .copy_buffer(local_image_buffer.clone(), shared_image_buffer.clone())
@@ -189,8 +464,11 @@ fn main() {
                 shared_dist_image_buffer.clone(),
             )
             .expect("failed to copy buffer")
-            //.copy_buffer_to_image(local_image_buffer.clone(), image.clone())
-            //.unwrap()
+            .copy_buffer(
+                local_reflect_image_buffer.clone(),
+                shared_reflect_image_buffer.clone(),
+            )
+            .expect("failed to copy buffer")
             .build()
             .expect("failed to build command buffer")
             .execute(queue.clone())
@@ -200,181 +478,546 @@ fn main() {
             .wait(None)
             .unwrap();
 
-    println!("gpu done!!!");
-    /*
-    let finished = command_buffer
-        .execute(queue.clone())
-        .expect("failed to execute command buffer");
+        println!("raytrace {}/{} done!!!", ray_count + 1, RAYS_PER_PIXEL);
 
-    finished
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
-        */
-    /*
-
-    let content = shared_image_buffer.read().unwrap();
-    //for pixel in content.pixels.iter().take(16) {
-    //    println!("{:?}", pixel);
-    //}
-    let converted = content
-        .pixels
-        .iter()
-        .flat_map(|pixel| {
-            vec![
-                (pixel.r().clone().min(1.0).max(0.0) * std::u8::MAX as f32) as u8,
-                (pixel.g().clone().min(1.0).max(0.0) * std::u8::MAX as f32) as u8,
-                (pixel.b().clone().min(1.0).max(0.0) * std::u8::MAX as f32) as u8,
-                (pixel.a().clone().min(1.0).max(0.0) * std::u8::MAX as f32) as u8,
-            ]
-            .into_iter()
-        })
-        .collect::<Vec<u8>>();
-        */
-
-    //let image =
-    //image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(IMAGE_SIZE[0], IMAGE_SIZE[1], converted)
-    //.expect("failed to create image");
-
-    let content = shared_image_buffer.read().expect("failed to read content");
-
-    let intensities_normalized = content
-        .iter()
-        .map(|v| (v.max(0.0).min(1.0) * std::u8::MAX as f32) as u8)
-        .collect::<Vec<u8>>();
-
-    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        IMAGE_SIZE[0],
-        IMAGE_SIZE[1],
-        intensities_normalized,
-    )
-    .expect("failed to create image");
-
-    image
-        .save("image-normalized.png")
-        .expect("failed to save image");
-
-    let radius: f32 = 0.3;
-
-    // source scale
-    let intensities = content
-        .iter()
-        .map(|v| *v / (4.0 * std::f32::consts::PI * radius.powf(2.0)))
-        .collect::<Vec<f32>>();
-
-    let content = shared_dist_image_buffer
-        .read()
-        .expect("failed to read content");
-    let max = content.iter().fold(0.0 / 0.0, |m, v| v.max(m));
-    let content = content.iter().map(|v| v / max).collect::<Vec<f32>>();
-
-    let content = {
-        let mut content = content;
-        content.iter_mut().skip(3).step_by(4).for_each(|v| *v = 1.0);
-        content
-    };
-
-    let content = content
-        .iter()
-        .map(|v| (v.min(1.0).max(0.0) * std::u8::MAX as f32) as u8)
-        .collect::<Vec<u8>>();
-
-    let image =
-        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(IMAGE_SIZE[0], IMAGE_SIZE[1], content)
-            .expect("failed to create image");
-
-    image.save("dist_image.png").expect("failed to save image");
-
-    let content = shared_dist_image_buffer
-        .read()
-        .expect("failed to read content");
-
-    let intensities = {
-        intensities
+        let intensities = shared_image_buffer
+            .read()
+            .expect("failed to read content")
             .iter()
-            .cloned()
-            .zip(content.iter().cloned())
-            .map(|(i, d)| i / d.powf(2.0))
-            .collect::<Vec<f32>>()
-    };
+            .copied()
+            .collect::<Vec<f32>>();
 
-    let intensities_conv = intensities
-        .iter()
-        .map(|v| (v.min(1.0).max(0.0) * std::u8::MAX as f32) as u8)
-        .collect::<Vec<u8>>();
+        let distancies = shared_dist_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
 
-    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        IMAGE_SIZE[0],
-        IMAGE_SIZE[1],
-        intensities_conv,
-    )
-    .expect("failed to create image");
+        let reflections = shared_reflect_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
 
-    image.save("image.png").expect("failed to save image");
-
-    // time spent
-    let content = content
-        .iter()
-        .map(|v| v / SPEED_OF_SOUND)
-        .collect::<Vec<f32>>();
-
-    // index
-    let content = content
-        .iter()
-        .map(|v| v * SAMPLE_RATE as f32)
-        .map(|v| v as usize)
-        .collect::<Vec<usize>>();
-
-    let impulse_response_length = content.iter().cloned().max().unwrap() + 1;
-
-    let mut impulse_response = vec![0.0; impulse_response_length];
-    //let mut impulse_response = Vec::<f32>::with_capacity(impulse_response_length);
-
-    content
-        .iter()
-        .cloned()
-        .zip(
-            /*
-            shared_image_buffer
-                .read()
-                .expect("failed to read content")
+        for offset in 0..6 {
+            let mut intensities = intensities.clone();
+            normalize(&mut intensities);
+            set_alpha_to_1(&mut intensities);
+            let intensities = intensities
                 .iter()
-                .cloned(),
-                */
-            intensities.iter().cloned(),
-        )
-        .for_each(|(dist, value)| {
-            impulse_response[dist] += value;
-        });
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
 
-    plot(&impulse_response, "ir.pdf");
+            let mut distancies = distancies.clone();
+            normalize(&mut distancies);
+            set_alpha_to_1(&mut distancies);
+            let distancies = distancies
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
+
+            let dir = match offset {
+                0 => "front",
+                1 => "back",
+                2 => "left",
+                3 => "right",
+                4 => "top",
+                5 => "bottom",
+                _ => unreachable!(),
+            };
+
+            intensities
+                .iter()
+                .enumerate()
+                .for_each(|(i, &v)| image_intensities_ave[offset][i] += v);
+
+            distancies
+                .iter()
+                .enumerate()
+                .for_each(|(i, &v)| image_distancies_ave[offset][i] += v);
+
+            /*
+            save_as_image_with_out_normalize(
+                &intensities,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("intensities-{}-{}.png", dir, ray_count),
+            );
+
+            save_as_image_with_out_normalize(
+                &distancies,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("distancies-{}-{}.png", dir, ray_count),
+            );
+            */
+        }
+
+        let (local_constants_buffer, local_constants_buffer_submit_command) =
+            vulkano::buffer::ImmutableBuffer::from_data(
+                shader::postprocess::ty::Constants {
+                    radius: audio_source_radius,
+                    image_length: IMAGE_LENGTH as u32,
+                    rays_per_pixel: RAYS_PER_PIXEL,
+                },
+                vulkano::buffer::BufferUsage::all(),
+                queue.clone(),
+            )
+            .unwrap();
+
+        local_constants_buffer_submit_command
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        let postprocess_shader = shader::postprocess::Shader::load(device.clone())
+            .expect("failed to load compute shader");
+
+        let compute_pipeline = Arc::new(
+            vulkano::pipeline::ComputePipeline::new(
+                device.clone(),
+                &postprocess_shader.main_entry_point(),
+                &(),
+            )
+            .expect("failed to create compute pipeline"),
+        );
+
+        let descriptor_set = Arc::new(
+            vulkano::descriptor::descriptor_set::PersistentDescriptorSet::start(
+                compute_pipeline.clone(),
+                0,
+            )
+            .add_buffer(local_constants_buffer.clone())
+            .expect("failed to add local constants buffer")
+            .add_buffer(shared_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .add_buffer(shared_dist_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .add_buffer(shared_reflect_image_buffer.clone())
+            .expect("failed to add local image buffer")
+            .build()
+            .expect("failed to create descriptor set"),
+        );
+
+        vulkano::command_buffer::AutoCommandBufferBuilder::new(device.clone(), queue.family())
+            .expect("failed to create command buffer builder")
+            .dispatch(
+                NUM_DISPATCH_POSTPROCESS,
+                compute_pipeline.clone(),
+                descriptor_set.clone(),
+                (),
+            )
+            .expect("failed to dispatch")
+            .build()
+            .expect("failed to build command buffer")
+            .execute(queue.clone())
+            .expect("failed to execute command buffer")
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        println!("postprocess {}/{} done!!!", ray_count + 1, RAYS_PER_PIXEL);
+        println!();
+
+        let intensities = shared_image_buffer
+            .read()
+            .expect("failed to read content")
+            .iter()
+            .copied()
+            .collect::<Vec<f32>>();
+        /*
+        for offset in 0..6 {
+            let mut intensities = intensities.clone();
+            normalize(&mut intensities);
+            set_alpha_to_1(&mut intensities);
+            let intensities = intensities
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    // 24 = num_images(fblrtb = 6) * num_channels(rgba = 4)
+                    if ((offset * 4) <= (i % 24)) && ((i % 24) < (offset * 4 + 4)) {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<f32>>();
+
+            save_as_image_with_out_normalize(
+                &intensities,
+                IMAGE_SIZE[0],
+                IMAGE_SIZE[1],
+                format!("intensities-postprocessed-{}.png", offset.to_string()),
+            );
+        }
+        */
+
+        //scale_intensities(&mut intensities, radius, IMAGE_LENGTH, &distancies);
+        let intensities_left = get_half_of_cube(&intensities, false);
+        let intensities_right = get_half_of_cube(&intensities, true);
+        let distancies_left = get_half_of_cube(&distancies, false);
+        let distancies_right = get_half_of_cube(&distancies, true);
+
+        let impulse_response_left_ray = build_intensity_vec(
+            &distancies_left,
+            &intensities_left,
+            SPEED_OF_SOUND,
+            SAMPLE_RATE,
+        );
+
+        let impulse_response_right_ray = build_intensity_vec(
+            &distancies_right,
+            &intensities_right,
+            SPEED_OF_SOUND,
+            SAMPLE_RATE,
+        );
+
+        //impulse_response_left.resize(impulse_response_left_ray.len(), 0.0);
+        //impulse_response_right.resize(impulse_response_right_ray.len(), 0.0);
+
+        impulse_response_left_ray
+            .iter()
+            .take(impulse_response_left.len())
+            .enumerate()
+            .for_each(|(idx, &v)| impulse_response_left[idx] += v);
+
+        impulse_response_right_ray
+            .iter()
+            .take(impulse_response_right.len())
+            .enumerate()
+            .for_each(|(idx, &v)| impulse_response_right[idx] += v);
+    }
+
+    image_intensities_ave
+        .iter_mut()
+        .for_each(|i| i.iter_mut().for_each(|v| *v /= RAYS_PER_PIXEL as f32));
+
+    image_distancies_ave
+        .iter_mut()
+        .for_each(|i| i.iter_mut().for_each(|v| *v /= RAYS_PER_PIXEL as f32));
+
+    for offset in 0..6 {
+        let dir = match offset {
+            0 => "front",
+            1 => "back",
+            2 => "left",
+            3 => "right",
+            4 => "top",
+            5 => "bottom",
+            _ => unreachable!(),
+        };
+
+        save_as_image_with_out_normalize(
+            &image_intensities_ave[offset],
+            IMAGE_SIZE[0],
+            IMAGE_SIZE[1],
+            format!("intensities-{}.png", dir),
+        );
+
+        save_as_image_with_out_normalize(
+            &image_distancies_ave[offset],
+            IMAGE_SIZE[0],
+            IMAGE_SIZE[1],
+            format!("distancies-{}.png", dir),
+        );
+    }
+
+    /*
+    impulse_response_left
+        .iter_mut()
+        .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
+
+    impulse_response_right
+        .iter_mut()
+        .for_each(|v| *v /= RAYS_PER_PIXEL as f32);
+        */
+
+    //plot(&impulse_response, "ir.pdf");
+
+    /*
+    impulse_response_left
+        .iter()
+        .take(1000)
+        .enumerate()
+        .for_each(|(i, v)| println! {"{}: {}", i ,v});
+        */
+
+    /*
+    println!("filtering...");
 
     const FILTER_WIDTH: usize = 100;
 
-    let mut impulse_response_filtered = impulse_response.clone();
-    for index in 0..impulse_response.len() - FILTER_WIDTH {
-        let sum: f32 = impulse_response.iter().skip(index).take(FILTER_WIDTH).sum();
-        let ave = sum / FILTER_WIDTH as f32;
-        impulse_response_filtered[index] = ave;
+    {
+        let mut impulse_response_filtered = impulse_response_left.clone();
+        filter(&mut impulse_response_filtered, FILTER_WIDTH);
+        plot(&impulse_response_filtered, "ir-filtered-left.pdf");
+
+        let mut impulse_response_filtered = impulse_response_right.clone();
+        filter(&mut impulse_response_filtered, FILTER_WIDTH);
+        plot(&impulse_response_filtered, "ir-filtered-right.pdf");
     }
 
-    plot(&impulse_response_filtered, "ir-filtered.pdf");
+    println!("done filtering!!!");
+    */
 
-    impulse_response.iter_mut().for_each(|v| *v = v.min(100.0));
-    let max = impulse_response
+    // magic
+    magic(&mut impulse_response_left, 500.0);
+    magic(&mut impulse_response_right, 500.0);
+
+    // normalize
+    let max_left = max_of(&impulse_response_left);
+    let max_right = max_of(&impulse_response_right);
+    let max = max_left.max(max_right);
+
+    impulse_response_left.iter_mut().for_each(|v| *v /= max);
+    impulse_response_right.iter_mut().for_each(|v| *v /= max);
+
+    plot(&impulse_response_left, "ir-normalized-left.pdf");
+    plot(&impulse_response_right, "ir-normalized-right.pdf");
+
+    println!("building ir...");
+
+    let len_left = impulse_response_left.len();
+    let len_right = impulse_response_right.len();
+    let len = len_left.max(len_right);
+
+    let impulse_response = {
+        (0..len)
+            .map(|index| {
+                let sample_left = impulse_response_left.get(index).unwrap_or(&0.0);
+                let sample_right = impulse_response_right.get(index).unwrap_or(&0.0);
+                [*sample_left, *sample_right]
+            })
+            .collect::<Vec<[f32; 2]>>()
+    };
+
+    let mut signal = white_noise(len);
+
+    amplitude(&mut signal, &impulse_response);
+
+    write_wav(signal, "ir.wav".to_string());
+
+    println!("done building ir!!!");
+}
+
+fn get_half_of_cube(source: &Vec<f32>, is_right: bool) -> Vec<f32> {
+    // f b l r t b
+    const NUM_CHANNELS: usize = 4;
+    const IMAGE_HALF_WIDTH: usize = IMAGE_SIZE[0] as usize;
+
+    source
         .iter()
-        .fold(0.0 / 0.0, |m, v| v.min(1.0).max(m));
-    impulse_response.iter_mut().for_each(|v| *v /= max);
+        .skip(IMAGE_LENGTH * 2 * NUM_CHANNELS)
+        .take(IMAGE_LENGTH * NUM_CHANNELS) // l
+        .chain(
+            source
+                .iter()
+                .take(IMAGE_LENGTH * 2 * NUM_CHANNELS) // f b
+                .chain(
+                    source
+                        .iter()
+                        .skip(IMAGE_LENGTH * 4 * NUM_CHANNELS)
+                        .take(IMAGE_LENGTH * 2 * NUM_CHANNELS), // t b
+                )
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    // gather left/right half
+                    match ((i / (IMAGE_HALF_WIDTH * NUM_CHANNELS)) % 2, is_right) {
+                        (0, false) => Some(v),
+                        (1, false) => None,
+                        (0, true) => None,
+                        (1, true) => Some(v),
+                        _ => unreachable!(),
+                    }
+                }),
+        )
+        .cloned()
+        .collect()
+}
 
+fn scale_intensities(
+    intensities: &mut Vec<f32>,
+    audio_source_radius: f32,
+    image_length: usize,
+    distancies: &Vec<f32>,
+) {
+    /*
+    intensities
+        .iter_mut()
+        .for_each(|v| *v /= 4.0 * std::f32::consts::PI * audio_source_radius.powi(2));
+
+    intensities
+        .iter_mut()
+        .for_each(|v| *v /= image_length as f32);
+
+    decay_intensities_by_distancies(intensities, &distancies);
+    */
+}
+
+fn save_as_image(source: &Vec<f32>, image_width: u32, image_height: u32, path: String) {
+    let normalized = {
+        let mut source = source.clone();
+        normalize(&mut source);
+        set_alpha_to_1(&mut source);
+        source
+    };
+
+    let normalized_u8 = vec_f32_to_vec_u8(&normalized);
+
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        image_width as u32,
+        image_height as u32,
+        normalized_u8,
+    )
+    .expect("failed to create image");
+
+    image.save(path).expect("failed to save image");
+}
+
+fn save_as_image_with_out_normalize(
+    source: &Vec<f32>,
+    image_width: u32,
+    image_height: u32,
+    path: String,
+) {
+    let source_u8 = vec_f32_to_vec_u8(&source);
+
+    let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        image_width as u32,
+        image_height as u32,
+        source_u8,
+    )
+    .expect("failed to create image");
+
+    image.save(path).expect("failed to save image");
+}
+
+fn set_alpha_to_1(target: &mut Vec<f32>) {
+    assert_eq!(target.len() % 4, 0);
+    target.iter_mut().skip(3).step_by(4).for_each(|v| *v = 1.0)
+}
+
+fn decay_intensities_by_distancies(intensities: &mut Vec<f32>, distancies: &Vec<f32>) {
+    assert_eq!(intensities.len(), distancies.len());
+    intensities
+        .iter_mut()
+        .zip(distancies.iter())
+        .for_each(|(i, &d)| *i /= d.powi(2));
+}
+
+fn vec_f32_to_vec_u8(source: &Vec<f32>) -> Vec<u8> {
+    source
+        .iter()
+        .map(|&v| {
+            assert!(0.0 <= v && v <= 1.0, "v: {}", v);
+            (v * std::u8::MAX as f32) as u8
+        })
+        .collect::<Vec<u8>>()
+}
+
+fn build_intensity_vec(
+    distancies: &Vec<f32>,
+    intensities: &Vec<f32>,
+    speed_of_sound: f32,
+    sample_rate: u32,
+) -> Vec<f32> {
+    assert_eq!(distancies.len(), intensities.len());
+
+    // convert distance to time
+    let times = distancies
+        .iter()
+        .map(|v| v / speed_of_sound)
+        .collect::<Vec<f32>>();
+
+    // convert time to index
+    let indicies = times
+        .iter()
+        .map(|v| v * sample_rate as f32)
+        .map(|v| v as usize)
+        .collect::<Vec<usize>>();
+
+    let length = indicies.iter().cloned().max().unwrap() + 1;
+    let mut intensity_vec = vec![0.0; length];
+
+    indicies
+        .iter()
+        .cloned()
+        .zip(intensities.iter().cloned())
+        .for_each(|(dist, value)| {
+            intensity_vec[dist] += value;
+        });
+    intensity_vec
+}
+
+fn normalize(target: &mut Vec<f32>) {
+    let max = max_of(target);
+    target.iter_mut().for_each(|v| *v /= max);
+}
+
+fn max_of(target: &Vec<f32>) -> f32 {
+    target.iter().fold(std::f32::NAN, |m, v| v.max(m))
+}
+
+fn ceil_at(target: &mut Vec<f32>, ceil: f32) {
+    target.iter_mut().for_each(|v| *v = v.min(ceil));
+}
+
+fn magic(target: &mut Vec<f32>, value: f32) {
+    target
+        .iter_mut()
+        .for_each(|v| *v = if value < *v { 0.0 } else { *v });
+}
+
+fn amplitude(lhs: &mut Vec<[f32; 2]>, rhs: &Vec<[f32; 2]>) {
+    assert_eq!(lhs.len(), rhs.len());
+    for index in 0..lhs.len() {
+        lhs[index][0] *= rhs[index][0];
+        lhs[index][1] *= rhs[index][1];
+    }
+}
+
+fn filter(target: &mut Vec<f32>, filter_width: usize) {
+    for index in 0..target.len() - filter_width {
+        let sum: f32 = target.iter().skip(index).take(filter_width).sum();
+        let ave = sum / filter_width as f32;
+        target[index] = ave;
+    }
+}
+
+fn white_noise(length: usize) -> Vec<[f32; 2]> {
     use rand::prelude::*;
-    let mut signal = vec![0.0; impulse_response_length];
+
     let mut rng = rand::thread_rng();
-    for index in 0..impulse_response_length {
-        signal[index] = rng.gen();
-        signal[index] *= impulse_response[index];
+    let mut signal = vec![[0.0; 2]; length];
+    for index in 0..length {
+        signal[index] = [rng.gen(), rng.gen()];
     }
 
+    signal
+}
+
+fn write_wav(content: Vec<[f32; 2]>, name: String) {
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: SAMPLE_RATE,
@@ -382,12 +1025,12 @@ fn main() {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = hound::WavWriter::create("ir.wav", spec).unwrap();
+    let mut writer = hound::WavWriter::create(name, spec).unwrap();
 
-    for sample in signal {
+    for [sample_left, sample_right] in content {
         let amp = std::i16::MAX as f32;
-        writer.write_sample((sample * amp) as i16).unwrap();
-        writer.write_sample((sample * amp) as i16).unwrap();
+        writer.write_sample((sample_left * amp) as i16).unwrap();
+        writer.write_sample((sample_right * amp) as i16).unwrap();
     }
 
     writer.finalize().unwrap();
@@ -473,345 +1116,5 @@ mod color {
         fn a_mut(&mut self) -> &mut T {
             &mut self[3]
         }
-    }
-}
-
-mod compute_shader {
-    use crate::IMAGE_LENGTH;
-
-    pub struct Image {
-        pub pixels: [[f32; 4]; IMAGE_LENGTH],
-    }
-
-    impl Default for Image {
-        fn default() -> Self {
-            Self {
-                pixels: [[0.0, 0.0, 0.0, 1.0]; IMAGE_LENGTH],
-            }
-        }
-    }
-
-    pub struct Constants {
-        pub image_size: [u32; 2],
-    }
-
-    vulkano_shaders::shader! {
-        ty: "compute",
-        include: [ "src/glsl" ],
-        src: "
-            #version 450
-
-            layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
-
-            layout(set = 0, binding = 0) buffer ConstantsBuffer {
-                uvec2 image_size;
-            } constants;
-
-            layout(set = 0, binding = 1) buffer ImageBuffer {
-                vec4 pixels[];
-            } image;
-
-            layout(set = 0, binding = 2) buffer DistImageBuffer {
-                vec4 pixels[];
-            } dist_image;
-
-            struct Ray {
-                vec3 origin;
-                vec3 direction;
-            };
-
-            struct Sphere {
-                float radius;
-                vec3  position;
-                vec3 color;
-                float reflection_ratio;
-                // boolean
-                int emission;
-            };
-
-            struct Plane {
-                vec3 position;
-                vec3 normal;
-                vec3 color;
-                float reflection_ratio;
-            };
-
-            struct Intersection {
-                int   hit;
-                int hit_emission;
-                vec3  hitPoint;
-                vec3  normal;
-                vec3  color;
-                float distance;
-                vec3  rayDir;
-                float intensity;
-                float intensity_dump_ratio;
-            };
-
-            const vec3  LDR = vec3(0.577);
-            const float EPS = 0.0001;
-            const int   MAX_REF = 256;
-            const float dump_ratio = 0.000000;
-            const float rand_ratio = 0.2;
-            const int EXEC_COUNT = 128;
-
-            // num perticles / m
-            const float particle_density = 1.0;
-            const float particle_try_dist = 0.0;
-            const float particle_probability = 0.0000;
-            const float particle_reflection_ratio = 1.00;
-
-            Sphere sphere[3];
-            Plane plane[6];
-
-            float rand(vec2 co) {
-                return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
-            }
-
-            vec3 random_in_unit_sphere(float seed) {
-                vec3 p;
-                float squared_length;
-                uint count = 0;
-
-                float x;
-                float y;
-                float z;
-
-                do {
-                    count += 1;
-                    vec2 seed1 = gl_GlobalInvocationID.xy + (float(count) + seed);
-                    vec2 seed2 = gl_GlobalInvocationID.yz + (float(count) + seed + 1.0);
-                    vec2 seed3 = gl_GlobalInvocationID.xz + (float(count) + seed + 2.0);
-
-                    x = 2.0 * rand(seed1) - 1.0;
-                    y = 2.0 * rand(seed2) - 1.0;
-                    z = 2.0 * rand(seed3) - 1.0;
-
-                    squared_length = x * x + y * y + z * z;
-                } while (squared_length >= 1.0);
-                return vec3(x, y, z);
-            }
-
-            void initialize_intersection(inout Intersection intersection) {
-                intersection.hit      = 0;
-                intersection.hitPoint = vec3(0.0);
-                intersection.normal   = vec3(0.0);
-                intersection.color    = vec3(0.0);
-                intersection.intensity = 1.0;
-                intersection.distance = 1.0e+30;
-                intersection.rayDir   = vec3(0.0);
-                intersection.hit_emission = 0;
-                intersection.intensity_dump_ratio = 1.0;
-            }
-
-            void intersect_particle(Ray ray, inout Intersection intersection) {
-                int hit = 0;
-                for(float dist = 0.0; dist < particle_try_dist; dist += 1.0/particle_density) {
-                    //vec2 seed = ray.direction.xy + ray.origin.yz + intersection.rayDir.xy + intersection.hitPoint.yz - vec2(dist, intersection.normal.z) + gl_GlobalInvocationID.xy;
-                    vec2 seed = vec2(dot((vec2(ray.direction.y) + vec2(dist, intersection.normal.x)), - intersection.normal.yz), intersection.normal.xy);
-                    float seed2 = dist + ray.direction.x + ray.origin.y + ray.direction.y + intersection.hitPoint.x + intersection.intensity + intersection.rayDir.z + intersection.normal.x + gl_GlobalInvocationID.x + gl_GlobalInvocationID.y;
-                    if (dist < intersection.distance && rand(seed) < particle_probability) {
-                        intersection.hitPoint = ray.origin + ray.direction * dist;
-                        intersection.normal = 2.0 * random_in_unit_sphere(seed2) - 1.0;
-
-                        intersection.distance = dist;
-                        intersection.hit++;
-                        intersection.rayDir = ray.direction;
-                        intersection.intensity_dump_ratio = max(1.0 - intersection.distance * dump_ratio, 0.0);
-                        intersection.intensity_dump_ratio *= particle_reflection_ratio;
-                        break;
-                    }
-                }
-            }
-
-            void intersect_sphere(Ray ray, Sphere sphere, inout Intersection intersection){
-                vec3  a = ray.origin - sphere.position;
-                float b = dot(a, ray.direction);
-                float c = dot(a, a) - (sphere.radius * sphere.radius);
-                float d = b * b - c;
-                float t = -b - sqrt(d);
-                if(d > 0.0 && t > EPS && t < intersection.distance){
-                    intersection.hitPoint = ray.origin + ray.direction * t;
-                    intersection.normal = normalize(intersection.hitPoint - sphere.position);
-                    d = clamp(dot(LDR, intersection.normal), 0.1, 1.0);
-                    intersection.color = sphere.color * d;
-                    intersection.distance = t;
-                    intersection.hit++;
-                    intersection.rayDir = ray.direction;
-                
-                    intersection.intensity *= max(1.0 - intersection.distance * dump_ratio, 0.0);
-                
-                    if(sphere.emission == 1) {
-                        //intersection.hit--;
-                        intersection.hit_emission += 1;
-                    }
-                    else
-                    {
-                        intersection.intensity_dump_ratio = sphere.reflection_ratio;
-                    }
-                }
-            }
-
-            void intersect_plane(Ray ray, Plane plane, inout Intersection intersection){
-                float d = -dot(plane.position, plane.normal);
-                float v = dot(ray.direction, plane.normal);
-                float t = -(dot(ray.origin, plane.normal) + d) / v;
-                if(t > EPS && t < intersection.distance){
-                    intersection.hitPoint = ray.origin + ray.direction * t;
-                    intersection.normal = plane.normal;
-                    float d = clamp(dot(LDR, intersection.normal), 0.1, 1.0);
-                    float m = mod(intersection.hitPoint.x, 2.0);
-                    float n = mod(intersection.hitPoint.z, 2.0);
-                    float f = 1.0 - min(abs(intersection.hitPoint.z), 25.0) * 0.04;
-                    intersection.color = plane.color * d * f;
-                    intersection.distance = t;
-                    intersection.hit++;
-                    intersection.rayDir = ray.direction;
-                    intersection.intensity_dump_ratio = max(1.0 - intersection.distance * dump_ratio, 0.0);
-                    intersection.intensity_dump_ratio *= plane.reflection_ratio;
-                }
-            }
-
-            void intersectExec(Ray ray, inout Intersection intersection){
-                intersect_sphere(ray, sphere[0], intersection);
-                intersect_sphere(ray, sphere[1], intersection);
-                intersect_sphere(ray, sphere[2], intersection);
-                intersect_plane(ray, plane[0], intersection);
-                intersect_plane(ray, plane[1], intersection);
-                intersect_plane(ray, plane[2], intersection);
-                intersect_plane(ray, plane[3], intersection);
-                intersect_plane(ray, plane[4], intersection);
-                intersect_plane(ray, plane[5], intersection);
-                intersect_particle(ray, intersection);
-            }
-
-            void compute() {
-                float intensity = 0.0;
-                float distance = 0.0;
-                int hit_count = 0;
-                for (int count = 0; count < EXEC_COUNT; count++)
-                {
-                    // -1.0 ..= 1.0
-                    vec2 p = vec2(gl_GlobalInvocationID) / constants.image_size * vec2(2.0) - vec2(1.0);
-                    p.y = -p.y;
-                
-                    Ray ray;
-                    ray.origin = vec3(0.0, 2.0, 4.0);
-                    ray.direction = normalize(vec3(p.x, p.y, -0.5));
-                    //ray.direction = normalize(vec3(-0.5, p.y, p.x));
-                    //ray.direction = normalize(vec3(p.x, p.y, 0.5));
-                
-                    // sphere init
-                    sphere[0].radius = 0.5;
-                    sphere[0].position = vec3(0.0, -0.5, sin(1.0));
-                    sphere[0].color = vec3(1.0, 0.0, 0.0);
-                    sphere[0].reflection_ratio = 1.0;
-                    sphere[0].emission = 0;
-                
-                    sphere[1].radius = 1.0;
-                    sphere[1].position = vec3(2.0, 0.0, cos(1.0 * 0.666));
-                    sphere[1].color = vec3(0.0, 1.0, 0.0);
-                    sphere[1].reflection_ratio = 1.0;
-                    sphere[1].emission = 0;
-                
-                    sphere[2].radius = 0.3;
-                    sphere[2].position = vec3(-2.0, 0.5, -3.0);
-                    sphere[2].color = vec3(0.0, 0.0, 1.0);
-                    sphere[2].reflection_ratio = 0.0;
-                    sphere[2].emission = 1;
-                
-                    // plane init
-                    plane[0].position = vec3(0.0, -5.0, 0.0);
-                    plane[0].normal = vec3(0.0, 1.0, 0.0);
-                    plane[0].color = vec3(0.0, 1.0, 0.0);
-                    plane[0].reflection_ratio = 1.0;
-                
-                    plane[1].position = vec3(0.0, 5.0, 0.0);
-                    plane[1].normal = vec3(0.0, -1.0, 0.0);
-                    plane[1].color = vec3(1.0, 0.0, 1.0);
-                    plane[1].reflection_ratio = 1.0;
-                
-                    plane[2].position = vec3(-5.0, 0.0, 0.0);
-                    plane[2].normal = vec3(1.0, 0.0, 0.0);
-                    plane[2].color = vec3(1.0, 0.0, 0.0);
-                    plane[2].reflection_ratio = 1.0;
-                
-                    plane[3].position = vec3(5.0, 0.0, 0.0);
-                    plane[3].normal = vec3(-1.0, 0.0, 0.0);
-                    plane[3].color = vec3(0.0, 1.0, 1.0);
-                    plane[3].reflection_ratio = 1.0;
-                
-                    plane[4].position = vec3(0.0, 0.0, -5.0);
-                    plane[4].normal = vec3(0.0, 0.0, 1.0);
-                    plane[4].color = vec3(0.0, 0.0, 1.0);
-                    plane[4].reflection_ratio = 1.0;
-                
-                    plane[5].position = vec3(0.0, 0.0, 5.0);
-                    plane[5].normal = vec3(0.0, 0.0, -1.0);
-                    plane[5].color = vec3(1.0, 1.0, 0.0);
-                    plane[5].reflection_ratio = 1.0;
-                
-                    // intersection init
-                    Intersection its;
-                    initialize_intersection(its);
-                
-                    // hit check
-                    vec3 destColor = vec3(ray.direction.y);
-                    vec3 tempColor = vec3(0.0);
-                    Ray q;
-                    intersectExec(ray, its);
-                    if(its.hit > 0){
-                        destColor = its.color;
-                        tempColor *= its.color;
-                        for(int j = 1; j < MAX_REF; j++){
-                            q.origin = its.hitPoint + its.normal * EPS;
-                        
-                            q.direction = reflect(its.rayDir, its.normal);
-                            q.direction = normalize(q.direction);
-                            q.direction += rand_ratio * random_in_unit_sphere(length(its.hitPoint) + its.normal.y + float(count) + its.intensity*its.normal.z - float(j));
-                            //q.direction = normalize(q.direction);
-
-                            distance += its.distance;
-                        
-                            intersectExec(q, its);
-                            its.intensity *= its.intensity_dump_ratio;
-                            if(its.hit > j){
-                                destColor += tempColor * its.color;
-                                tempColor *= its.color;
-                            }
-
-                            if (0 < its.hit_emission) {
-                                break;
-                            }
-                        }
-                    }
-                
-                    if (its.hit_emission == 0) {
-                        its.intensity = 0;
-                    }
-                    else{
-                        hit_count += 1;
-                    }
-                    intensity += its.intensity;
-                }
-            
-                intensity = intensity / float(EXEC_COUNT);
-                //distance = distance / float(hit_count);
-                distance = distance / float(EXEC_COUNT);
-            
-                uint index =
-                    gl_GlobalInvocationID.y * constants.image_size.x +
-                    gl_GlobalInvocationID.x;                
-            
-                //image.pixels[index] = vec4(destColor, 1.0);
-                image.pixels[index] = vec4(vec3(intensity), 1.0);
-                dist_image.pixels[index] = vec4(vec3(distance), 1.0);
-            }
-
-
-            void main() {
-                compute();
-            }
-        ",
     }
 }
